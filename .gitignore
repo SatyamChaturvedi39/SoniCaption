@@ -65,7 +65,6 @@ data/ESC-50/
 ESC-50/
 *.tar.gz
 *.zip
-*.pt
 *.pth
 *.ckpt
 *.onnx

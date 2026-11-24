@@ -1,0 +1,28 @@
+{
+  "architecture": "SonicAcousticResNet18",
+  "pretrained_backbone": "resnet18",
+  "input_channels": 1,
+  "sample_rate": 16000,
+  "n_fft": 1024,
+  "hop_length": 512,
+  "win_length": 1024,
+  "n_mels": 128,
+  "clip_duration_seconds": 5.0,
+  "num_classes": 10,
+  "classes": [
+    "clapping",
+    "coughing",
+    "dog",
+    "door_wood_knock",
+    "footsteps",
+    "glass_breaking",
+    "laughter",
+    "rain",
+    "siren",
+    "sneezing"
+  ],
+  "best_val_accuracy": 93.06,
+  "macro_f1_score": 0.837,
+  "total_params": 11237194,
+  "training_epochs": 25
+}

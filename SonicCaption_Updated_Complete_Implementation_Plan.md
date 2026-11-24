@@ -509,13 +509,20 @@ soniccaption/
 └── LICENSE
 ```
 
-### 8.1 Group Member Primary Ownership & Responsibilities
+### 8.1 Product Engineering Pillars & Group Ownership
 
-| Team Member | Role | Specific Scope & Commits | Deliverables |
+#### Architectural Philosophy: Notebook-First Research Core & Lean Service Adapters
+In a real-world machine learning audio product, production `.py` files should not obscure scientific and mathematical derivations:
+1. **Interactive Notebooks (`notebooks/`) Hold the Core Algorithmic & Modeling Logic:**  
+   All signal processing equations, psychoacoustic transforms, deep neural network training loops, hyperparameter tuning, metric evaluations, and visual interpretations live directly inside reproducible Jupyter Notebooks (`01_*`, `02_*`, `03_*`).
+2. **Backend Python Modules (`backend/src/`) Act as Clean Service Adapters:**  
+   The Python files under `backend/` are lightweight, modular application wrappers and FastAPI endpoints that package the notebook-proven algorithms into production services for the React web application.
+
+| Team Member | Product Role | Core Research Notebooks (The Logic) | Backend Service Scope & Deliverables |
 |---|---|---|---|
-| **Member 1** | **DSP & Algorithm Specialist** | `backend/src/soniccaption/audio/`, `algorithms/` (spectral, LPC, VQ, DTW), and lab unit tests | Mathematical correctness of Units 1, 2, and 3 algorithms; robust resampling, feature matrices, test assertions |
-| **Member 2** | **ML Engineer & Model Trainer** | `notebooks/`, `services/` (ESC-50 CNN, Groq ASR adapter, VAD), `algorithms/hmm.py`, Model Card | Google Colab training notebook, Hugging Face checkpoint publishing, Unit 4 HMM/Viterbi implementation, WER and F1 evaluations |
-| **Member 3** | **Full-Stack & Product Engineer** | `frontend/` (React, Vite, WaveSurfer, Tailwind), `backend/api/`, `main.py`, Dockerfile, Vercel/HF CI deployment | Commercial-grade UI, WaveSurfer audio syncing, interactive Trellis and DTW charts, FastAPI routing, deployment orchestration |
+| **Member 1** | **Audio Signal Processing & Acoustic Intelligence Lead** | • `notebooks/01_audio_feature_extraction_pipeline.ipynb` (from-scratch DSP, framing, STFT, Mel, MFCCs, Levinson-Durbin LPC formants, VQ, DTW)<br>• `notebooks/02_environmental_sound_classifier_training.ipynb` (ESC-50 ResNet-18 model training, SpecAugment, 93.06% accuracy, model export) | `backend/src/soniccaption/audio/`, `algorithms/` (spectral, LPC, VQ, DTW), and automated test suite (`17/17 passing tests`). Report Pages 2 & 3. |
+| **Member 2** | **Speech Recognition, Sequence Modeling & Timeline Fusion Lead** | • `notebooks/03_speech_recognition_and_sequence_fusion.ipynb` (Silero VAD interval segmentation, Whisper ASR evaluation, Discrete HMM formulation, Viterbi dynamic programming trellis decoding, and chronological timeline fusion) | `backend/src/soniccaption/services/` (Whisper ASR, ResNet sliding-window loader), `audio/vad.py`, `algorithms/hmm.py`, `timeline/fusion.py`. Report Page 4. |
+| **Member 3** | **Full-Stack Product, UI/UX & Deployment Lead** | • Integrates and demonstrates all notebook-proven capabilities in the commercial web product | `frontend/` (React 18, Vite, WaveSurfer.js, Tailwind), `backend/main.py`, `backend/api/`, subtitle exporters (`.srt`, `.vtt`, `.json`), Dockerfile, and Vercel/Spaces deployment. Report Pages 1 & 5 + Screenshots PDF. |
 
 ---
 
@@ -630,23 +637,35 @@ Do not introduce mock data placeholders or skip mathematical implementations.
 Verify setup using npm build and pytest.
 ```
 
-### Prompt 2: DSP & Speech Engineer (Member 1)
+### Prompt 2: Audio Signal Processing & Acoustic Intelligence Lead (Member 1)
 ```text
-You are the DSP and Speech Signal Processing specialist for SonicCaption.
-Own backend/src/soniccaption/audio/ and algorithms/ (spectral, lpc, vq, dtw).
-Implement robust 16kHz resampling, energy, ZCR, FFT, STFT, filter-banks, MFCC,
-Levinson-Durbin LPC, and custom DTW dynamic programming with Euclidean/Cosine distances.
-Ensure numeric stability on silence and short audio. Provide comprehensive pytest tests
-with documented mathematical assertions.
+You are Member 1 (Audio Signal Processing & Acoustic Intelligence Lead) on the SonicCaption team.
+Your objective is to own the foundational audio research, from-scratch DSP transforms, and the acoustic neural classifier.
+
+Your assigned scope:
+1. notebooks/01_audio_feature_extraction_pipeline.ipynb: Complete from-scratch DSP pipeline (resampling, framing, Hamming window, FFT, STFT, 40-channel Mel filterbanks, 13 MFCCs + Deltas, Levinson-Durbin LPC formants, VQ, DTW).
+2. notebooks/02_environmental_sound_classifier_training.ipynb: ESC-50 dataset ingestion, DSP feature bridge, SpecAugment, ResNet-18 transfer learning achieving 93.06% validation accuracy, model weights export.
+3. backend/src/soniccaption/audio/ and algorithms/: Modular service implementations of all audio DSP transforms.
+4. backend/tests/: Pytest test suite validating numerical stability, silence handling, and algorithm accuracy (17/17 passing tests).
+
+Follow the data contracts in core/schemas.py. Do not edit UI or ASR service files.
 ```
 
-### Prompt 3: ML & Recognition Engineer (Member 2)
+### Prompt 3: Speech Recognition, Sequence Modeling & Timeline Fusion Lead (Member 2)
 ```text
-You are the ML Engineer for SonicCaption. Own notebooks/ for ESC-50 training,
-services/ for Groq Whisper ASR and custom CNN inference, and algorithms/hmm.py.
-Build the 4-layer CNN for 10-class environmental sound detection, log-Mel preprocessing,
-and export weights to Hugging Face. Implement the Discrete HMM, Forward likelihood,
-and Viterbi decoding algorithm with backpointers. Write rigorous unit tests.
+You are Member 2 (Speech Recognition, Sequence Modeling & Timeline Fusion Lead) on the SonicCaption team.
+Your objective is to build the speech-to-text pipeline, sequence alignment algorithms, and timeline fusion engine.
+
+Your assigned scope:
+1. notebooks/03_speech_recognition_and_sequence_fusion.ipynb: VAD speech segmentation, Whisper ASR evaluation, Discrete HMM formulation, Viterbi dynamic trellis decoding, and timeline fusion algorithm.
+2. backend/src/soniccaption/audio/vad.py: Silero VAD speech interval detector.
+3. backend/src/soniccaption/services/asr_service.py: Groq Whisper API provider with faster-whisper local fallback.
+4. backend/src/soniccaption/services/sound_cnn.py: Sliding-window inference service loading Member 1's ResNet weights.
+5. backend/src/soniccaption/algorithms/hmm.py: Discrete HMM (pi, A, B), Forward likelihood, and Viterbi dynamic programming decoder.
+6. backend/src/soniccaption/timeline/fusion.py: Chronological merger of Whisper speech segments and ResNet acoustic tags.
+7. Pytest test cases under backend/tests/ validating HMM Viterbi and timeline fusion.
+
+Follow the data contracts in core/schemas.py. Do not edit UI or DSP internals.
 ```
 
 ### Prompt 4: Frontend & Product Engineer (Member 3)
@@ -669,7 +688,7 @@ trellis visualizer. Ensure responsive layout, error alerts, and one-click SRT/JS
 | **1:45–2:45** | **Signal Lab (Units 1 & 2)** | Switch to **Signal Lab** tab. | Show real-time FFT spectrum, STFT 2D spectrogram, and short-time energy/ZCR. Highlight MFCC 13-coefficient heatmap. Show LPC spectral envelope formant peaks tracking vocal tract resonances. Explain K-means VQ codebook clusters. |
 | **2:45–3:45** | **Pattern Matching (Unit 3)** | Switch to **Pattern Matcher** tab. Load two utterances. | Run DTW alignment. Display the 2D accumulated cost matrix with the red dynamic programming path. Explain: *"The diagonal trace shows non-linear time-warping aligning speaking rates between the two utterances."* |
 | **3:45–4:30** | **HMM & Viterbi (Unit 4)** | Switch to **HMM Sandbox** tab. Select Fair/Biased Coin or Weather model. | Click **Run Viterbi**. Dynamic SVG Trellis highlights state transition path. Point out forward variable log-likelihood and optimal decoded state sequence. |
-| **4:30–5:15** | **Model Training & Proof** | Switch to **Model Card** tab. Show Colab training history and confusion matrix. | *"We trained our custom 4-layer CNN on ESC-50 in Google Colab using log-Mel spectrograms, achieving 84% accuracy across 10 target classes, hosted on Hugging Face Hub."* |
+| **4:30–5:15** | **Model Training & Proof** | Switch to **Model Card** tab. Show Colab training history and confusion matrix. | *"We trained our custom ResNet-18 on ESC-50 in Google Colab using log-Mel spectrograms with SpecAugment, achieving 93.06% accuracy and 0.837 macro F1 across 10 target classes, hosted locally and on Hugging Face Hub."* |
 | **5:15–5:45** | **Export & Accessibility** | Click **Export**, select `.srt` and `.vtt`. Open downloaded file. | Demonstrate timestamped subtitles with embedded sound cues ready for VLC, YouTube, or video editing software. |
 | **5:45–6:00** | **Conclusion & Q&A** | Show FastAPI Swagger docs (`/docs`) and GitHub commit history. | Summarize full syllabus coverage (Units 1–4), modular architecture, and invite faculty questions. |
 

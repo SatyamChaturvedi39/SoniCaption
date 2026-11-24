@@ -65,6 +65,7 @@ data/ESC-50/
 ESC-50/
 *.tar.gz
 *.zip
+!SonicCaption_CIA_III_LaTeX_Report.zip
 *.pth
 *.ckpt
 *.onnx

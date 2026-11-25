@@ -193,6 +193,44 @@ PRESETS: dict[str, dict] = {
         "B": [[0.7, 0.2, 0.1], [0.2, 0.6, 0.2], [0.1, 0.2, 0.7]],
         "example_observations": ["Red", "Red", "Blue", "Green", "Green", "Blue"],
     },
+    "acoustic_scene": {
+        "name": "acoustic_scene",
+        "description": "Production audio scene HMM smoothing transitions between Ambient silence, Speech, and Environmental Event windows.",
+        "states": ["Ambient", "Speech", "SoundEvent"],
+        "symbols": ["quiet", "voice", "mixed", "burst"],
+        "pi": [0.5, 0.35, 0.15],
+        "A": [
+            [0.70, 0.20, 0.10],
+            [0.15, 0.75, 0.10],
+            [0.20, 0.20, 0.60],
+        ],
+        "B": [
+            [0.78, 0.08, 0.06, 0.08],
+            [0.08, 0.72, 0.15, 0.05],
+            [0.08, 0.10, 0.22, 0.60],
+        ],
+        "example_observations": ["quiet", "voice", "burst", "voice"],
+    },
+    "prosody_discourse": {
+        "name": "prosody_discourse",
+        "description": "Unit 4 spoken prosody & lecture engagement HMM decoding conversational states from pitch/energy observations.",
+        "states": ["TurnPause", "Explanation", "KeyEmphasis", "QuestionPrompt"],
+        "symbols": ["silent_pause", "steady_voice", "stressed_loud", "rising_pitch"],
+        "pi": [0.25, 0.50, 0.15, 0.10],
+        "A": [
+            [0.55, 0.35, 0.05, 0.05],
+            [0.12, 0.63, 0.15, 0.10],
+            [0.10, 0.35, 0.45, 0.10],
+            [0.25, 0.30, 0.10, 0.35],
+        ],
+        "B": [
+            [0.82, 0.10, 0.04, 0.04],
+            [0.08, 0.68, 0.14, 0.10],
+            [0.04, 0.20, 0.66, 0.10],
+            [0.05, 0.18, 0.12, 0.65],
+        ],
+        "example_observations": ["silent_pause", "steady_voice", "stressed_loud", "rising_pitch", "steady_voice"],
+    },
 }
 
 
@@ -293,4 +331,76 @@ def decode_for_ui(model: DiscreteHMM, observations: Sequence[str | int]) -> dict
         "best_path_prob": v["best_path_prob"],
         "trellis_nodes": nodes,
         "trellis_edges": edges,
+    }
+
+
+def decode_acoustic_scene_hmm(
+    duration: float,
+    vad_segments: list[dict],
+    sound_events: list[dict],
+    step_s: float = 1.0,
+) -> dict:
+    """Apply the discrete acoustic_scene HMM to discretised intervals of a live clip."""
+    total_steps = max(1, min(30, int(np.ceil(max(duration, step_s) / step_s))))
+    obs: list[str] = []
+    for k in range(total_steps):
+        t0, t1 = k * step_s, (k + 1) * step_s
+        has_vad = any(min(t1, float(s["end"])) > max(t0, float(s["start"])) for s in vad_segments)
+        has_ev = any(
+            min(t1, float(e["end"])) > max(t0, float(e["start"])) and float(e.get("confidence", 0.0)) >= 0.40
+            for e in sound_events
+        )
+        if has_vad and has_ev:
+            obs.append("mixed")
+        elif has_ev:
+            obs.append("burst")
+        elif has_vad:
+            obs.append("voice")
+        else:
+            obs.append("quiet")
+
+    model, _ = load_preset("acoustic_scene")
+    decoded = decode_for_ui(model, obs)
+    return {
+        "step_s": step_s,
+        "observations": decoded["observations"],
+        "best_path": decoded["best_path"],
+        "log_likelihood": decoded["log_likelihood"],
+        "best_path_log_prob": decoded["best_path_log_prob"],
+    }
+
+
+def decode_prosody_hmm(
+    speech_segments: list[dict],
+    duration: float,
+    step_s: float = 1.0,
+) -> dict:
+    """Decode Unit 4 conversational prosody states across 1s windows using Unit 1-2 acoustic cues."""
+    total_steps = max(1, min(30, int(np.ceil(max(duration, step_s) / step_s))))
+    obs: list[str] = []
+    for k in range(total_steps):
+        t0, t1 = k * step_s, (k + 1) * step_s
+        active = [
+            s for s in speech_segments
+            if min(t1, float(s.get("end", 0.0))) > max(t0, float(s.get("start", 0.0)))
+        ]
+        if not active:
+            obs.append("silent_pause")
+            continue
+        styles = " ".join(str(s.get("delivery_style", "")) for s in active)
+        if "Question" in styles or "Rising" in styles:
+            obs.append("rising_pitch")
+        elif "Emphasized" in styles or max(float(s.get("energy_ratio", 1.0)) for s in active) >= 1.25:
+            obs.append("stressed_loud")
+        else:
+            obs.append("steady_voice")
+
+    model, _ = load_preset("prosody_discourse")
+    decoded = decode_for_ui(model, obs)
+    return {
+        "step_s": step_s,
+        "observations": decoded["observations"],
+        "best_path": decoded["best_path"],
+        "log_likelihood": decoded["log_likelihood"],
+        "best_path_log_prob": decoded["best_path_log_prob"],
     }

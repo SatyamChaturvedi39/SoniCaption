@@ -7,6 +7,7 @@ persists across restarts and can be searched or updated from the React UI.
 """
 
 from __future__ import annotations
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -75,6 +76,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _db_conn(db_path: Path | str | None = None):
+    return closing(_connect(db_path))
+
+
 def save_session(
     *,
     filename: str,
@@ -91,7 +96,7 @@ def save_session(
     metrics: Dict[str, Any],
     db_path: Path | str | None = None,
 ) -> int:
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         cur = conn.execute(
             """
             INSERT INTO sessions (
@@ -122,7 +127,7 @@ def save_session(
 
 def list_sessions(search: str = "", limit: int = 50, db_path: Path | str | None = None) -> List[Dict[str, Any]]:
     q = f"%{search.strip().lower()}%"
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         rows = conn.execute(
             """
             SELECT * FROM sessions
@@ -142,7 +147,7 @@ def list_sessions(search: str = "", limit: int = 50, db_path: Path | str | None 
 
 
 def delete_session(session_id: int, db_path: Path | str | None = None) -> bool:
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         cur = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
         return cur.rowcount > 0
@@ -158,7 +163,7 @@ def add_reminder(
     db_path: Path | str | None = None,
 ) -> Dict[str, Any]:
     now = _utc_now()
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         cur = conn.execute(
             """
             INSERT INTO reminders (session_id, title, due_time, priority, trigger_source, status, created_at)
@@ -172,7 +177,7 @@ def add_reminder(
 
 
 def list_reminders(status: Optional[str] = None, db_path: Path | str | None = None) -> List[Dict[str, Any]]:
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         if status:
             rows = conn.execute("SELECT * FROM reminders WHERE status = ? ORDER BY id DESC", (status,)).fetchall()
         else:
@@ -185,7 +190,7 @@ def list_reminders(status: Optional[str] = None, db_path: Path | str | None = No
 def update_reminder_status(reminder_id: int, status: str, db_path: Path | str | None = None) -> Optional[Dict[str, Any]]:
     if status not in ("pending", "completed"):
         raise ValueError("status must be 'pending' or 'completed'")
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         conn.execute("UPDATE reminders SET status = ? WHERE id = ?", (status, reminder_id))
         conn.commit()
         row = conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
@@ -193,7 +198,7 @@ def update_reminder_status(reminder_id: int, status: str, db_path: Path | str | 
 
 
 def delete_reminder(reminder_id: int, db_path: Path | str | None = None) -> bool:
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         cur = conn.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
         conn.commit()
         return cur.rowcount > 0
@@ -208,7 +213,7 @@ def log_alert(
     db_path: Path | str | None = None,
 ) -> Dict[str, Any]:
     now = _utc_now()
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         cur = conn.execute(
             """
             INSERT INTO alerts (created_at, event_label, confidence, severity, snippet_text)
@@ -222,6 +227,6 @@ def log_alert(
 
 
 def list_alerts(limit: int = 40, db_path: Path | str | None = None) -> List[Dict[str, Any]]:
-    with _connect(db_path) as conn:
+    with _db_conn(db_path) as conn:
         rows = conn.execute("SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]

@@ -125,12 +125,13 @@ def _read_labels(path: Path) -> list[str]:
     return [mapping[str(i)] for i in range(len(mapping))]
 
 
-def _resolve_dir(model_dir: str | Path | None) -> Path:
+def _resolve_dir(model_dir: str | Path | None, model_source: str | None = None) -> Path:
     if model_dir:
         return Path(model_dir)
     if os.environ.get("SOUND_MODEL_DIR"):
         return Path(os.environ["SOUND_MODEL_DIR"])
-    if os.environ.get("SOUND_MODEL_SOURCE", "").lower() == "hf-cnn":
+    src = (model_source or os.environ.get("SOUND_MODEL_SOURCE", "")).strip().lower()
+    if src == "hf-cnn":
         from huggingface_hub import snapshot_download
         return Path(snapshot_download(HF_CNN_REPO, revision=HF_CNN_REVISION,
                                       allow_patterns=["model.pt", "config.json", "labels.json"]))
@@ -161,9 +162,9 @@ def _load(model_dir: str) -> SoundModel:
     return SoundModel(net=net, kind=kind, labels=labels, sample_rate=int(cfg["sample_rate"]), name=name, config=cfg)
 
 
-def load_sound_model(model_dir: str | Path | None = None) -> SoundModel:
-    """Load (and cache) the sound model. Default: the team ResNet in services/weights/."""
-    return _load(str(_resolve_dir(model_dir).resolve()))
+def load_sound_model(model_dir: str | Path | None = None, model_source: str | None = None) -> SoundModel:
+    """Load (and cache) the sound model. Default: Member 1's ResNet-18 in services/weights/; or 'hf-cnn' for Member 2's CNN."""
+    return _load(str(_resolve_dir(model_dir, model_source=model_source).resolve()))
 
 
 # =============================================================== inference
@@ -190,9 +191,61 @@ def classify_audio_window(audio: np.ndarray, sample_rate: int, model: SoundModel
     return [{"label": m.labels[i], "score": round(float(p[i]), 4)} for i in np.argsort(-p)]
 
 
+def _window_acoustics(seg: np.ndarray) -> tuple[float, float, float, float]:
+    """Compute (rms, p95_frame_rms, dynamic_range_db, spectral_flatness) for ambient/fan filtering."""
+    rms = float(np.sqrt(np.mean(seg ** 2))) if seg.size else 0.0
+    if seg.size < 400:
+        return rms, rms, 0.0, 1.0
+    frame_len, hop = 400, 160
+    n_frames = 1 + (seg.size - frame_len) // hop
+    idx = np.arange(frame_len)[None, :] + (np.arange(n_frames) * hop)[:, None]
+    frames = seg[idx]
+    f_rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+    p15 = float(np.percentile(f_rms, 15))
+    p95 = float(np.percentile(f_rms, 95))
+    dyn_db = float(20.0 * np.log10((p95 + 1e-9) / (p15 + 1e-9)))
+    win = np.hanning(frame_len).astype(np.float32)
+    spec_pow = np.abs(np.fft.rfft(frames * win[None, :], n=512, axis=1)) ** 2 + 1e-12
+    spec_pow = spec_pow[:, 3:]  # ignore sub-90 Hz fan motor/AC rumble when measuring flatness
+    geo_mean = np.exp(np.mean(np.log(spec_pow), axis=1))
+    arith_mean = np.mean(spec_pow, axis=1)
+    sfm = float(np.median(geo_mean / np.maximum(arith_mean, 1e-12)))
+    return rms, p95, dyn_db, sfm
+
+
+def _is_stationary_ambient_prediction(
+    label: str,
+    score: float,
+    rms: float,
+    p95_rms: float,
+    dyn_db: float,
+    sfm: float,
+    clip_floor_rms: float,
+    baseline_rms: float = 0.0,
+) -> bool:
+    """Reject closed-set CNN guesses triggered by quiet room noise or steady fan airflow."""
+    rms_floor = max(0.022, 1.8 * baseline_rms)   # ~ -33.1 dB default; adapts upward to loud calibrated fans
+    peak_floor = max(0.036, 2.5 * baseline_rms)  # ~ -28.9 dB foreground peak requirement
+    if rms < rms_floor and p95_rms < peak_floor:
+        return True
+    eff_clip_floor = max(clip_floor_rms, baseline_rms, 1e-6)
+    prom_db = float(20.0 * np.log10((p95_rms + 1e-9) / eff_clip_floor))
+    if label == "rain":
+        # Indoor steady fan/HVAC noise looks identical to soft rain below ~-25 dB
+        return (rms < max(0.055, 2.5 * baseline_rms) or score < 0.78) and dyn_db < 5.5
+    if label == "siren":
+        # Genuine sirens are strongly tonal (low spectral flatness), unlike broadband fan noise
+        return sfm > 0.22 or p95_rms < max(0.028, 2.0 * baseline_rms)
+    # Transient / modulated classes (laughing, coughing, clapping, glass_breaking, dog, etc.)
+    is_transient = (dyn_db >= 5.2 or prom_db >= 5.2) and p95_rms >= max(0.030, 2.0 * baseline_rms)
+    is_clear_tonal_burst = sfm < 0.14 and p95_rms >= max(0.032, 1.6 * eff_clip_floor)
+    return not (is_transient or is_clear_tonal_burst)
+
+
 def detect_sound_events(audio: np.ndarray, sample_rate: int, window_s: float = 2.0, hop_s: float = 0.5,
                         threshold: float = 0.5, silence_rms: float = 1e-3,
-                        model: SoundModel | None = None) -> list[dict]:
+                        model: SoundModel | None = None, ignore_ambient: bool = False,
+                        baseline_rms: float = 0.0, model_source: str | None = None) -> list[dict]:
     """Slide a window over the clip and return sound events (raw: merging/fusion happens in timeline.fusion).
 
     The default 2 s window (0.5 s hop) was chosen on the demo clip: 1 s windows gave too little context for a model
@@ -200,9 +253,10 @@ def detect_sound_events(audio: np.ndarray, sample_rate: int, window_s: float = 2
 
     Windows quieter than `silence_rms` are skipped because the model has no "silence" class, and predictions
     below `threshold` are dropped because a closed-set model gives *some* label to every input.
+    When `ignore_ambient=True`, stationary room/fan noise windows are also filtered before labeling.
     Consecutive windows with the same label are joined. Timestamps are window-level approximations.
     """
-    m = model or load_sound_model()
+    m = model or load_sound_model(model_source=model_source)
     sr = m.sample_rate
     x = _mono_resampled(audio, sample_rate, sr)
     if x.size == 0:
@@ -211,13 +265,22 @@ def detect_sound_events(audio: np.ndarray, sample_rate: int, window_s: float = 2
     starts = list(range(0, max(x.size - W, 0) + 1, H))
     if x.size > W and starts[-1] + W < x.size:
         starts.append(x.size - W)                          # cover the tail
+
+    acoustics = [_window_acoustics(x[s:s + W]) for s in starts]
+    clip_floor_rms = float(np.percentile([a[1] for a in acoustics], 15)) if acoustics else 0.0
+    eff_silence = max(silence_rms, baseline_rms * 1.15) if ignore_ambient and baseline_rms > 0 else silence_rms
+
     events: list[dict] = []
-    for s in starts:
+    for s, (rms, p95_rms, dyn_db, sfm) in zip(starts, acoustics):
         seg = x[s:s + W]
-        if float(np.sqrt(np.mean(seg ** 2))) < silence_rms:
+        if rms < eff_silence:
             continue
         top = classify_audio_window(seg, sr, m)[0]
         if top["score"] < threshold:
+            continue
+        if ignore_ambient and _is_stationary_ambient_prediction(
+            top["label"], float(top["score"]), rms, p95_rms, dyn_db, sfm, clip_floor_rms, baseline_rms=baseline_rms
+        ):
             continue
         st, en = round(s / sr, 2), round(min(s + W, x.size) / sr, 2)
         if events and events[-1]["label"] == top["label"] and st <= events[-1]["end"]:

@@ -3,6 +3,93 @@
  * resamples to 16 kHz Mono 16-bit PCM WAV so live microphone recordings & watch
  * chunks run reliably without format conversion errors.
  */
+
+export const RAW_MIC_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  channelCount: 1,
+}
+
+export function startContinuousPcmMonitor(
+  stream: MediaStream,
+  chunkMs: number,
+  onChunk: (file: File) => void,
+): () => void {
+  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+  const ctx = new AudioCtx()
+  const source = ctx.createMediaStreamSource(stream)
+  const processor = ctx.createScriptProcessor(4096, 1, 1)
+  const silentGain = ctx.createGain()
+  silentGain.gain.value = 0
+
+  const nativeSr = ctx.sampleRate
+  const warmupSamples = Math.round(nativeSr * 0.25) // skip initial hardware switch-on transient
+  const targetChunkSamples = Math.max(1600, Math.round((nativeSr * chunkMs) / 1000))
+  let skipped = 0
+  let chunks: Float32Array[] = []
+  let buffered = 0
+  let stopped = false
+
+  processor.onaudioprocess = (ev) => {
+    if (stopped) return
+    const input = ev.inputBuffer.getChannelData(0)
+    if (skipped < warmupSamples) {
+      const needSkip = Math.min(input.length, warmupSamples - skipped)
+      skipped += needSkip
+      if (needSkip >= input.length) return
+      const rem = new Float32Array(input.subarray(needSkip))
+      chunks.push(rem)
+      buffered += rem.length
+    } else {
+      const copy = new Float32Array(input)
+      chunks.push(copy)
+      buffered += copy.length
+    }
+
+    if (buffered >= targetChunkSamples) {
+      const merged = new Float32Array(buffered)
+      let pos = 0
+      for (const c of chunks) {
+        merged.set(c, pos)
+        pos += c.length
+      }
+      chunks = []
+      buffered = 0
+      const resampled = resampleLinear(merged, nativeSr, 16000)
+      const wavBytes = encodePcm16Wav(resampled, 16000)
+      onChunk(new File([wavBytes], `watch-${Date.now()}.wav`, { type: 'audio/wav' }))
+    }
+  }
+
+  source.connect(processor)
+  processor.connect(silentGain)
+  silentGain.connect(ctx.destination)
+
+  return () => {
+    stopped = true
+    try { processor.disconnect() } catch {}
+    try { source.disconnect() } catch {}
+    try { silentGain.disconnect() } catch {}
+    ctx.close().catch(() => {})
+  }
+}
+
+function resampleLinear(samples: Float32Array, origSr: number, targetSr: number): Float32Array {
+  if (origSr === targetSr || samples.length < 2) return samples
+  const outLen = Math.max(1, Math.round((samples.length * targetSr) / origSr))
+  const out = new Float32Array(outLen)
+  const ratio = (samples.length - 1) / Math.max(1, outLen - 1)
+  for (let i = 0; i < outLen; i++) {
+    const srcIdx = i * ratio
+    const lo = Math.floor(srcIdx)
+    const hi = Math.min(samples.length - 1, lo + 1)
+    const frac = srcIdx - lo
+    out[i] = samples[lo] * (1 - frac) + samples[hi] * frac
+  }
+  return out
+}
+
 export async function blobToWavFile(blob: Blob, baseName = 'mic-recording'): Promise<File> {
   const arrayBuf = await blob.arrayBuffer()
   const AudioCtx = window.AudioContext || (window as any).webkitAudioContext

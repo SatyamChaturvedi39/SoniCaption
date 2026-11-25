@@ -9,6 +9,17 @@ export type TimelineItem = {
   confidence: number | null
   source?: string
   overlaps_speech?: boolean
+  delivery_style?: string
+  mean_f0_hz?: number
+  energy_ratio?: number
+  speaking_rate_wps?: number
+}
+
+export type DtwSpotMatch = {
+  start: number
+  end: number
+  normalized_distance: number
+  similarity_pct: number
 }
 
 export type ReminderItem = {
@@ -31,6 +42,15 @@ export type AlertItem = {
   snippet_text: string
 }
 
+export type SimilarSession = {
+  session_id: number
+  filename: string
+  created_at: string
+  normalized_distance: number
+  similarity_pct: number
+  summary: string
+}
+
 export type Analysis = {
   session_id?: number | null
   filename: string
@@ -39,6 +59,7 @@ export type Analysis = {
   mode: string
   summary?: string
   reminders?: ReminderItem[]
+  similar_sessions?: SimilarSession[]
   speech_segments: any[]
   sound_events: any[]
   timeline: TimelineItem[]
@@ -70,5 +91,7 @@ export type AgentTurnResponse = {
   reply: string
   provider: string
   new_reminders: ReminderItem[]
+  new_notes?: ReminderItem[]
+  matched_sessions?: { session_id: number; filename: string; summary: string }[]
   warnings: string[]
 }

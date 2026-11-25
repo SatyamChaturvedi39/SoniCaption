@@ -28,6 +28,25 @@ for candidate in (BASE_DIR / "src", ROOT_DIR / "backend" / "src", BASE_DIR / "ap
     if candidate.exists() and cand_str not in sys.path:
         sys.path.insert(0, cand_str)
 
+
+def _load_dotenv_files() -> None:
+    """Populate os.environ from root or backend .env if present (without overriding shell vars)."""
+    for env_path in (ROOT_DIR / ".env", BASE_DIR / ".env"):
+        if not env_path.is_file():
+            continue
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+_load_dotenv_files()
+
 from .mock_data import DTW as MOCK_DTW, HMM as MOCK_HMM, analysis as mock_analysis
 
 try:
@@ -36,11 +55,21 @@ try:
     from soniccaption.audio.vad import detect_speech, speech_ratio as compute_speech_ratio
     from soniccaption.algorithms.dtw import dtw
     from soniccaption.algorithms.enhancement import (
+        analyze_segment_prosody,
         diarize_speakers,
         estimate_pitch_contour,
+        extract_clip_signature,
+        find_similar_sessions_dtw,
         spectral_subtraction_denoise,
+        subsequence_dtw_search,
     )
-    from soniccaption.algorithms.hmm import DiscreteHMM, decode_for_ui, load_preset
+    from soniccaption.algorithms.hmm import (
+        DiscreteHMM,
+        decode_acoustic_scene_hmm,
+        decode_for_ui,
+        decode_prosody_hmm,
+        load_preset,
+    )
     from soniccaption.algorithms.lpc import analyze_frame_lpc
     from soniccaption.algorithms.spectral import (
         compute_fft_spectrum,
@@ -166,7 +195,48 @@ def _downsample_2d(mat: np.ndarray, max_rows: int = 36, max_cols: int = 48) -> L
     return [[round(float(v), 2) for v in row] for row in sub]
 
 
+def _build_signal_diagnostics(
+    raw: np.ndarray,
+    denoised: np.ndarray,
+    sr: int,
+    den_res: Dict[str, Any],
+    pitch: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compute inline Units 1-2 acoustic & spectral diagnostics on real clip audio."""
+    raw_seg = raw[: sr * 5]
+    den_seg = denoised[: sr * 5]
+    frames, _ = frame_signal(den_seg, 400, 160)
+    rms = compute_rms(frames)
+    zcrs = compute_zcr(frames)
+    fft_freqs, fft_mag = compute_fft_spectrum(den_seg[: min(len(den_seg), 8192)], sr=sr, n_fft=512)
+    _, _, stft_db = compute_stft(den_seg, sr=sr, frame_length=400, hop_length=160, n_fft=512)
+    mfccs, _, _ = compute_mfcc(den_seg, sr=sr, n_mfcc=13, n_mels=40)
+    pitch_out = pitch or estimate_pitch_contour(den_seg, sr=sr)
+    best_frame_idx = int(np.argmax(rms)) if len(rms) else 0
+    lpc = analyze_frame_lpc(frames[best_frame_idx], sr=sr, order=16, n_fft=512) if len(frames) else None
+
+    return {
+        "snr_before_db": den_res["snr_before_db"],
+        "snr_after_db": den_res["snr_after_db"],
+        "snr_gain_db": den_res["snr_gain_db"],
+        "waveform": _downsample_1d(raw_seg, 90),
+        "waveform_denoised": _downsample_1d(den_seg, 90),
+        "rms": _downsample_1d(rms, 48),
+        "zcr": _downsample_1d(zcrs, 48),
+        "fft_freqs": _downsample_1d(fft_freqs, 64),
+        "fft_mag_db": _downsample_1d(fft_mag, 64),
+        "stft_matrix": _downsample_2d(stft_db, max_rows=32, max_cols=56),
+        "mfcc": _downsample_2d(mfccs, max_rows=13, max_cols=40),
+        "lpc_formants_hz": lpc.formant_frequencies[:4] if lpc else [],
+        "lpc_envelope_db": _downsample_1d(lpc.spectral_envelope, 64) if lpc else [],
+        "f0_mean_hz": pitch_out["mean_f0_hz"],
+        "f0_contour_hz": _downsample_1d(np.array(pitch_out["f0_hz"], dtype=np.float32), 48),
+    }
+
+
 def _transcribe_with_vad_fallback(wav_path: str, vad_segments: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], str, Optional[str], List[str]]:
+    if not vad_segments:
+        return [], "silero-vad-none", None, ["No speech detected above ambient noise floor."]
     warnings: List[str] = []
     try:
         asr = transcribe_audio(wav_path)
@@ -185,8 +255,14 @@ def _transcribe_with_vad_fallback(wav_path: str, vad_segments: List[Dict[str, An
         return segs, "silero-vad-only", None, warnings
 
 
-def _run_multimodal_core(wav_path: str, filename: str, denoise: bool = True) -> Dict[str, Any]:
-    """Execute end-to-end Member 1 DSP + Member 2 VAD/ASR/ResNet/Fusion pipeline."""
+def _run_multimodal_core(
+    wav_path: str,
+    filename: str,
+    denoise: bool = True,
+    model_source: str = "resnet",
+    speaker_mode: str = "auto",
+) -> Dict[str, Any]:
+    """Execute end-to-end Member 1 DSP + Member 2 VAD/ASR/Sound/Fusion pipeline."""
     audio_data = load_audio(wav_path, target_sr=16000, to_mono=True, normalize_peak=False)
     duration = float(audio_data.duration)
     sample_rate = int(audio_data.sample_rate)
@@ -199,18 +275,37 @@ def _run_multimodal_core(wav_path: str, filename: str, denoise: bool = True) -> 
     vad_ratio = compute_speech_ratio(vad_segments, duration)
 
     t_asr = time.perf_counter()
-    raw_speech, speech_source, detected_lang, asr_warnings = _transcribe_with_vad_fallback(wav_path, vad_segments)
+    asr_wav_path = wav_path
+    temp_asr_paths: List[str] = []
+    if denoise and vad_segments:
+        import soundfile as sf
+        fd_asr, asr_wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd_asr)
+        temp_asr_paths.append(asr_wav_path)
+        sf.write(asr_wav_path, active_samples, sample_rate, subtype="PCM_16")
+    try:
+        raw_speech, speech_source, detected_lang, asr_warnings = _transcribe_with_vad_fallback(asr_wav_path, vad_segments)
+    finally:
+        _cleanup_files(temp_asr_paths)
     asr_time_ms = round((time.perf_counter() - t_asr) * 1000, 1)
 
     pitch_stats = estimate_pitch_contour(active_samples, sr=sample_rate)
-    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=2)
+    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=2, speaker_mode=speaker_mode)
+    prosody_speech = analyze_segment_prosody(active_samples, diarized_speech, sr=sample_rate)
 
     t_cnn = time.perf_counter()
-    raw_events = detect_sound_events(active_samples, sample_rate, threshold=0.0)
+    raw_events = detect_sound_events(
+        active_samples,
+        sample_rate,
+        threshold=0.0,
+        silence_rms=0.012,
+        ignore_ambient=True,
+        model_source=model_source,
+    )
     cnn_time_ms = round((time.perf_counter() - t_cnn) * 1000, 1)
 
     fused = fuse_timeline(
-        diarized_speech,
+        prosody_speech,
         raw_events,
         vad_segments=vad_segments,
         config=FusionConfig(duration=duration),
@@ -218,13 +313,19 @@ def _run_multimodal_core(wav_path: str, filename: str, denoise: bool = True) -> 
     )
     timeline = fused["timeline"]
 
-    # Map speaker identity back onto chronological speech items
+    # Map speaker identity & Unit 1-2 vocal delivery cues back onto chronological speech items
     spk_idx = 0
     for item in timeline:
         if item["category"] == "speech":
-            speaker = diarized_speech[spk_idx].get("speaker", "Speaker 1") if spk_idx < len(diarized_speech) else "Speaker 1"
+            src = prosody_speech[spk_idx] if spk_idx < len(prosody_speech) else {}
+            speaker = src.get("speaker", "Speaker 1")
             item["speaker"] = speaker
             item["label"] = speaker
+            if src:
+                item["delivery_style"] = src.get("delivery_style", "Steady Statement")
+                item["mean_f0_hz"] = src.get("mean_f0_hz", 0.0)
+                item["energy_ratio"] = src.get("energy_ratio", 1.0)
+                item["speaking_rate_wps"] = src.get("speaking_rate_wps", 0.0)
             spk_idx += 1
 
     speech_segments = [
@@ -235,6 +336,10 @@ def _run_multimodal_core(wav_path: str, filename: str, denoise: bool = True) -> 
             "speaker": item.get("speaker", "Speaker 1"),
             "text": item["display_text"],
             "words": item.get("words", []),
+            "delivery_style": item.get("delivery_style", "Steady Statement"),
+            "mean_f0_hz": item.get("mean_f0_hz", 0.0),
+            "energy_ratio": item.get("energy_ratio", 1.0),
+            "speaking_rate_wps": item.get("speaking_rate_wps", 0.0),
         }
         for idx, item in enumerate((x for x in timeline if x["category"] == "speech"), start=1)
     ]
@@ -251,12 +356,18 @@ def _run_multimodal_core(wav_path: str, filename: str, denoise: bool = True) -> 
         if item["category"] == "sound_event"
     ]
 
+    scene_hmm = decode_acoustic_scene_hmm(duration, vad_segments, sound_events, step_s=1.0)
+    prosody_hmm = decode_prosody_hmm(speech_segments, duration, step_s=1.0)
+    mfcc_signature = extract_clip_signature(active_samples, sr=sample_rate)
+    diagnostics = _build_signal_diagnostics(raw_samples, denoise_info["denoised"], sample_rate, denoise_info, pitch=pitch_stats)
+
     LAST_AUDIO_CONTEXT.clear()
     LAST_AUDIO_CONTEXT.update(
         {
             "filename": filename,
             "raw_samples": raw_samples,
             "denoised_samples": denoise_info["denoised"],
+            "active_samples": active_samples,
             "sr": sample_rate,
             "denoise_info": {k: v for k, v in denoise_info.items() if k != "denoised"},
         }
@@ -275,6 +386,10 @@ def _run_multimodal_core(wav_path: str, filename: str, denoise: bool = True) -> 
         "asr_time_ms": asr_time_ms,
         "cnn_time_ms": cnn_time_ms,
         "pitch_stats": pitch_stats,
+        "scene_hmm": scene_hmm,
+        "prosody_hmm": prosody_hmm,
+        "mfcc_signature": mfcc_signature,
+        "diagnostics": diagnostics,
         "speech_segments": speech_segments,
         "sound_events": sound_events,
         "timeline": timeline,
@@ -296,23 +411,15 @@ def health():
     }
 
 
-@app.post("/api/v1/settings/groq-key")
-def set_groq_key(payload: Dict[str, str]):
-    key = (payload.get("api_key") or "").strip()
-    if key:
-        os.environ["GROQ_API_KEY"] = key
-    else:
-        os.environ.pop("GROQ_API_KEY", None)
-    return {"groq_configured": bool(os.environ.get("GROQ_API_KEY"))}
-
-
 # --------------------------------------------------------------------------- audio analysis
 @app.post("/api/v1/audio/analyze")
 async def analyze_audio(
     file: UploadFile = File(...),
     denoise: bool = Form(True),
     source_type: str = Form("upload"),
+    model_source: str = Form("resnet"),
     save_log: bool = Form(True),
+    speaker_mode: str = Form("auto"),
 ):
     ext = _validate_audio_ext(file.filename)
     data = await _read_upload_bytes(file)
@@ -328,7 +435,13 @@ async def analyze_audio(
     cleanup_paths: List[str] = []
     try:
         wav_path, cleanup_paths = _write_temp_wav(data, ext)
-        res = _run_multimodal_core(wav_path, file.filename or "audio.wav", denoise=denoise)
+        res = _run_multimodal_core(
+            wav_path,
+            file.filename or "audio.wav",
+            denoise=denoise,
+            model_source=model_source,
+            speaker_mode=speaker_mode,
+        )
 
         insights = agent_service.extract_session_insights(
             res["speech_segments"],
@@ -337,8 +450,9 @@ async def analyze_audio(
         )
 
         metrics = {
-            "model_architecture": "SonicAcousticResNet-18",
-            "dataset": "ESC-50 (10 balanced classes incl. laughing)",
+            "model_architecture": "SonicCNN (4-Block HF)" if model_source == "hf-cnn" else "SonicAcousticResNet-18",
+            "sound_model_source": model_source,
+            "dataset": "ESC-50 (10 balanced classes)",
             "classes_monitored": 10,
             "best_val_accuracy": 88.75,
             "test_accuracy": 80.0,
@@ -359,8 +473,13 @@ async def analyze_audio(
             "warnings": res["asr_warnings"],
             "summary": insights["summary"],
             "insights_provider": insights["provider"],
+            "scene_hmm": res["scene_hmm"],
+            "prosody_hmm": res["prosody_hmm"],
+            "mfcc_signature": res["mfcc_signature"],
+            "diagnostics": res["diagnostics"],
         }
 
+        prior_sessions = session_store.list_sessions(limit=25)
         session_id = None
         saved_reminders: List[Dict[str, Any]] = []
         if save_log:
@@ -398,6 +517,14 @@ async def analyze_audio(
                         snippet_text=f"{desc} inside {file.filename or 'recording'}",
                     )
 
+        similar_sessions = find_similar_sessions_dtw(
+            res["mfcc_signature"],
+            prior_sessions,
+            current_session_id=session_id,
+            top_k=3,
+        )
+        metrics["similar_sessions"] = similar_sessions
+
         return {
             "session_id": session_id,
             "filename": file.filename,
@@ -406,6 +533,7 @@ async def analyze_audio(
             "mode": "live",
             "summary": insights["summary"],
             "reminders": saved_reminders if saved_reminders else insights["reminders"],
+            "similar_sessions": similar_sessions,
             "speech_segments": res["speech_segments"],
             "sound_events": res["sound_events"],
             "timeline": res["timeline"],
@@ -420,6 +548,38 @@ async def analyze_audio(
         fallback["sample_rate"] = rate
         fallback["metrics"]["fallback_error"] = str(exc)
         return fallback
+    finally:
+        _cleanup_files(cleanup_paths)
+
+
+@app.post("/api/v1/audio/query-dtw")
+async def query_audio_dtw(
+    file: UploadFile = File(...),
+    denoise: bool = Form(True),
+):
+    """Unit 3 Query-by-Example Spoken Keyword / Sound Spotter using Subsequence DTW over MFCCs."""
+    if not HAS_LIVE_MODEL:
+        raise HTTPException(status_code=503, detail="Live ML pipeline unavailable.")
+    target_samples = LAST_AUDIO_CONTEXT.get("active_samples")
+    if target_samples is None or len(target_samples) < 800:
+        raise HTTPException(status_code=400, detail="Analyze a recording in Audio Studio first before querying by voice.")
+
+    ext = _validate_audio_ext(file.filename)
+    data = await _read_upload_bytes(file)
+    if not data:
+        raise HTTPException(status_code=400, detail="Query audio is empty.")
+
+    cleanup_paths: List[str] = []
+    try:
+        wav_path, cleanup_paths = _write_temp_wav(data, ext)
+        q_audio = load_audio(wav_path, target_sr=16000, to_mono=True, normalize_peak=False)
+        q_samples = spectral_subtraction_denoise(q_audio.samples, sr=16000)["denoised"] if denoise else q_audio.samples
+        matches = subsequence_dtw_search(q_samples, target_samples, sr=16000, top_k=3)
+        return {
+            "target_filename": LAST_AUDIO_CONTEXT.get("filename", ""),
+            "query_duration": round(float(q_audio.duration), 2),
+            "matches": matches,
+        }
     finally:
         _cleanup_files(cleanup_paths)
 
@@ -480,12 +640,15 @@ async def voice_agent_turn(
             timeline = res["timeline"]
 
         pending = session_store.list_reminders(status="pending")
+        all_sessions = session_store.list_sessions(limit=25)
+        archive_first = sorted(all_sessions, key=lambda s: (1 if s.get("source_type") == "voice_agent" else 0, -(s.get("id") or 0)))
         turn = agent_service.run_voice_agent_turn(
             user_text=user_text,
             sound_events=sound_events,
             pitch_stats=pitch_stats,
             pending_reminders=pending,
             history=history,
+            recent_sessions=archive_first[:12],
         )
 
         sid = session_store.save_session(
@@ -522,6 +685,8 @@ async def voice_agent_turn(
             "reply": turn["reply"],
             "provider": turn["provider"],
             "new_reminders": saved_reminders,
+            "new_notes": saved_reminders,
+            "matched_sessions": turn.get("matched_sessions", []),
             "warnings": warnings,
         }
     finally:
@@ -529,7 +694,12 @@ async def voice_agent_turn(
 
 
 @app.post("/api/v1/watch/chunk")
-async def watch_ambient_chunk(file: UploadFile = File(...), denoise: bool = Form(True)):
+async def watch_ambient_chunk(
+    file: UploadFile = File(...),
+    denoise: bool = Form(True),
+    baseline_rms: float = Form(0.0),
+    model_source: str = Form("resnet"),
+):
     """Low-latency ambient monitoring chunk handler for Live Safety Watch Mode."""
     if not HAS_LIVE_MODEL:
         raise HTTPException(status_code=503, detail="Live ML pipeline unavailable.")
@@ -549,13 +719,24 @@ async def watch_ambient_chunk(file: UploadFile = File(...), denoise: bool = Form
 
         rms = float(np.sqrt(np.mean(active ** 2))) if active.size else 0.0
         rms_db = round(float(20.0 * np.log10(max(rms, 1e-6))), 1)
-        vad_segs = detect_speech(active, 16000)
-        events = detect_sound_events(active, 16000, window_s=1.5, hop_s=0.5, threshold=0.35)
+        vad_floor = max(0.010, baseline_rms * 1.45) if baseline_rms > 0 else 0.010
+        vad_segs = detect_speech(active, 16000, min_segment_rms=vad_floor)
+        events = detect_sound_events(
+            active,
+            16000,
+            window_s=2.0,
+            hop_s=0.5,
+            threshold=0.60,
+            silence_rms=0.012,
+            ignore_ambient=True,
+            baseline_rms=baseline_rms,
+            model_source=model_source,
+        )
 
         urgent_alert = None
         for ev in events:
             key = agent_service.canonical_sound_key(ev["label"])
-            if key in agent_service.URGENT_SOUNDS and float(ev["confidence"]) >= 0.50:
+            if key in agent_service.URGENT_SOUNDS and float(ev["confidence"]) >= 0.72:
                 sev, desc = agent_service.URGENT_SOUNDS[key]
                 urgent_alert = session_store.log_alert(
                     event_label=ev["label"],
@@ -567,6 +748,7 @@ async def watch_ambient_chunk(file: UploadFile = File(...), denoise: bool = Form
 
         return {
             "rms_db": rms_db,
+            "noise_rms": round(rms, 5),
             "has_speech": len(vad_segs) > 0,
             "events": events,
             "urgent_alert": urgent_alert,
@@ -587,6 +769,17 @@ def remove_session(session_id: int):
     if not session_store.delete_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return {"deleted": True, "id": session_id}
+
+
+@app.get("/api/v1/sessions/{session_id}/similar")
+def similar_sessions(session_id: int):
+    """Find acoustically similar past recordings via DTW over saved MFCC signatures."""
+    all_sess = session_store.list_sessions(limit=50)
+    target = next((s for s in all_sess if s["id"] == session_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Session not found")
+    sig = (target.get("metrics") or {}).get("mfcc_signature") or []
+    return {"matches": find_similar_sessions_dtw(sig, all_sess, current_session_id=session_id, top_k=5)}
 
 
 @app.get("/api/v1/reminders")
@@ -671,42 +864,13 @@ async def signal_lab(file: Optional[UploadFile] = File(None), use_last: bool = Q
             denoised = den_res["denoised"]
             label = "DSP Benchmark (Noisy /a/ Vowel + Spectral Subtraction)"
 
-        # Truncate analysis window to max 5s for responsive canvas rendering
-        raw_seg = raw[: sr * 5]
-        den_seg = denoised[: sr * 5]
-
-        frames, _ = frame_signal(den_seg, 400, 160)
-        rms = compute_rms(frames)
-        zcrs = compute_zcr(frames)
-        fft_freqs, fft_mag = compute_fft_spectrum(den_seg[: min(len(den_seg), 8192)], sr=sr, n_fft=512)
-        _, _, stft_db = compute_stft(den_seg, sr=sr, frame_length=400, hop_length=160, n_fft=512)
-        mfccs, _, _ = compute_mfcc(den_seg, sr=sr, n_mfcc=13, n_mels=40)
-        pitch = estimate_pitch_contour(den_seg, sr=sr)
-
-        # Pick highest-energy frame for LPC vocal-tract formant envelope
-        best_frame_idx = int(np.argmax(rms)) if len(rms) else 0
-        lpc = analyze_frame_lpc(frames[best_frame_idx], sr=sr, order=16, n_fft=512)
-
+        diag = _build_signal_diagnostics(raw, denoised, sr, den_res)
         return {
             "mode": "live",
             "label": label,
             "sample_rate": sr,
             "duration": round(len(raw) / float(sr), 2),
-            "snr_before_db": den_res["snr_before_db"],
-            "snr_after_db": den_res["snr_after_db"],
-            "snr_gain_db": den_res["snr_gain_db"],
-            "waveform": _downsample_1d(raw_seg, 90),
-            "waveform_denoised": _downsample_1d(den_seg, 90),
-            "rms": _downsample_1d(rms, 48),
-            "zcr": _downsample_1d(zcrs, 48),
-            "fft_freqs": _downsample_1d(fft_freqs, 64),
-            "fft_mag_db": _downsample_1d(fft_mag, 64),
-            "stft_matrix": _downsample_2d(stft_db, max_rows=32, max_cols=56),
-            "mfcc": _downsample_2d(mfccs, max_rows=13, max_cols=40),
-            "lpc_formants_hz": lpc.formant_frequencies[:4],
-            "lpc_envelope_db": _downsample_1d(lpc.spectral_envelope, 64),
-            "f0_mean_hz": pitch["mean_f0_hz"],
-            "f0_contour_hz": _downsample_1d(np.array(pitch["f0_hz"], dtype=np.float32), 48),
+            **diag,
         }
     except Exception as exc:
         print(f"[Signal Lab fallback] {exc}")

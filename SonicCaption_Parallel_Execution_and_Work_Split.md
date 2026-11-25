@@ -90,6 +90,11 @@ Focus: Audio Ingestion, Spectral Transformations, Psychoacoustic Features & Envi
     - Pretrained ResNet-18 fine-tuning adapted for 1-channel log-Mel spectrograms.
     - Achieves 88.75% Fold-4 validation accuracy, 80.00% strictly held-out Fold-5 test accuracy, and 0.787 macro F1 in 30 epochs across all 10 balanced ESC-50 classes.
     - Full export of model weights (soniccaption_esc50_resnet.pt), config.json, labels.json, and figures.
+  * notebooks/04_acoustic_enhancement_diarization_and_agent.ipynb (Option 5 Product Extension)
+    - Boll's Spectral Subtraction Denoising (OLA) with segmental SNR gain validation.
+    - Autocorrelation fundamental pitch (F0) contour tracking across voiced speech.
+    - MFCC/log-Mel + F0 + K-Means VQ speaker turn diarization (Speaker 1 vs Speaker 2).
+    - End-to-end validation of SQLite call logging, reminder extraction, and acoustic-aware voice copilot.
 - Backend Service Adapter Modules:
   * backend/src/soniccaption/audio/io.py (validation, decoding, mono conversion, 16kHz resampling)
   * backend/src/soniccaption/audio/preprocessing.py (framing, Hamming windowing, pre-emphasis)
@@ -97,11 +102,14 @@ Focus: Audio Ingestion, Spectral Transformations, Psychoacoustic Features & Envi
   * backend/src/soniccaption/algorithms/lpc.py (Levinson-Durbin, PARCOR, formant root-solving)
   * backend/src/soniccaption/algorithms/vq.py (K-Means & LBG codebook generators)
   * backend/src/soniccaption/algorithms/dtw.py (Dynamic Time Warping dynamic programming)
-  * backend/tests/ (Full automated test suite — 17/17 passing unit tests)
+  * backend/src/soniccaption/algorithms/enhancement.py (Spectral Subtraction denoising, F0 contour, VQ diarization)
+  * backend/src/soniccaption/services/session_store.py (SQLite call logs, reminders, and urgent ambient alerts)
+  * backend/src/soniccaption/services/agent_service.py (Acoustic-aware Voice Copilot & smart reminder extraction)
+  * backend/tests/ (Full automated test suite — unit, enhancement, agent/store & API tests)
 - Deliverables Ownership:
-  * Notebooks 01 and 02 (fully executed with outputs and all 11 figures in notebooks/screenshots/).
+  * Notebooks 01, 02, and 04 (fully executed with outputs and figures).
   * Project Report: Page 2 (DSP Feature Extraction) + Page 3 (Acoustic Event Model Training).
-- Viva Specialisation: Sampling theory, Mel filter-banks, LPC vocal tract physics, SpecAugment, ResNet-18.
+- Viva Specialisation: Sampling theory, Mel filter-banks, LPC vocal tract physics, Spectral Subtraction SNR gain, VQ speaker diarization, SpecAugment, ResNet-18, Acoustic-Aware Copilot.
 
 ========================================================================================================
 MEMBER 2: SPEECH RECOGNITION, SEQUENCE MODELING & TIMELINE FUSION LEAD (Member 2)
@@ -266,7 +274,7 @@ Verify frontend with `npm run build` and backend with `pytest`.
 |---|---|---|---|
 | **Day 0: Contract Freeze** | Freeze `AudioData`, `SpectralFeatures`, `LPCResult`, `DTWResult`, and `TimelineItem` schemas. | Agree on Whisper transcript format & event tag schema `[Event]`. | Create `backend/api/mock_data.py` with mock payloads for all endpoints. |
 | **Day 1: Independent Core** | Implement `audio/io.py`, `preprocessing.py`, `spectral.py`. Run Notebook 01 in Colab. | Implement `audio/vad.py` and `services/asr_service.py` (Groq Whisper client). | Initialize React + Vite + Tailwind shell. Build WaveSurfer `AudioPlayer.tsx`. |
-| **Day 2: Algorithms & Training** | Implement `lpc.py`, `vq.py`, `dtw.py`. Fine-tune ResNet-18 in Notebook 02 (93% acc). | Implement `algorithms/hmm.py` (Viterbi trellis) and `services/sound_cnn.py`. | Build `WorkspacePage.tsx` and dual-track `TimelineView.tsx` with click-to-seek. |
-| **Day 3: Labs & Fusion** | Extract model weights & 11 figures. Verify 17/17 passing unit tests in `pytest`. | Implement `timeline/fusion.py` to merge speech text & sound tags chronologically. | Build `SignalLabPage.tsx`, `PatternLabPage.tsx`, `HMMPage.tsx`, and exporters. |
+| **Day 2: Algorithms & Training** | Implement `lpc.py`, `vq.py`, `dtw.py`, `enhancement.py`. Fine-tune ResNet-18 in Notebook 02 (88.75% Val / 80.00% Test). | Implement `algorithms/hmm.py` (Viterbi trellis) and `services/sound_cnn.py`. | Build `WorkspacePage.tsx` and dual-track `TimelineView.tsx` with click-to-seek. |
+| **Day 3: Labs & Fusion** | Build Notebook 04, SQLite `session_store.py`, and `agent_service.py` (Voice Copilot + Watch Monitor + Reminders). | Implement `timeline/fusion.py` to merge speech text & sound tags chronologically. | Build `SignalLab`, `PatternLab`, `HMM`, Copilot/Watch views, and exporters. |
 | **Day 4: Integration** | Validate live DSP & CNN outputs against API routes. | Connect live VAD $\to$ Whisper $\to$ ResNet $\to$ Timeline Fusion in `/audio/analyze`. | Toggle `USE_MOCK_DATA = False`. Test end-to-end audio upload $\to$ playback $\to$ `.srt` export. |
 | **Day 5: Deliverables** | Draft Report Page 2 (DSP) and Page 3 (Acoustic ResNet). | Draft Report Page 4 (Sequence Modeling & Timeline Fusion). | Capture high-res UI screenshots $\to$ Compile Screenshots PDF; draft Page 1 & 5. |

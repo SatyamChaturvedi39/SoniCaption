@@ -62,6 +62,9 @@ frontend/build/
 # Datasets and Large Audio / Model Weights
 data/raw/
 data/ESC-50/
+backend/data/
+*.db
+*.sqlite*
 ESC-50/
 *.tar.gz
 *.zip

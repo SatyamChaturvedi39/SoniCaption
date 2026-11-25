@@ -520,7 +520,7 @@ In a real-world machine learning audio product, production `.py` files should no
 
 | Team Member | Product Role | Core Research Notebooks (The Logic) | Backend Service Scope & Deliverables |
 |---|---|---|---|
-| **Member 1** | **Audio Signal Processing & Acoustic Intelligence Lead** | • `notebooks/01_audio_feature_extraction_pipeline.ipynb` (from-scratch DSP, framing, STFT, Mel, MFCCs, Levinson-Durbin LPC formants, VQ, DTW)<br>• `notebooks/02_environmental_sound_classifier_training.ipynb` (ESC-50 ResNet-18 model training, SpecAugment, 88.75% Val / 80.00% held-out Fold-5 Test accuracy, 0.787 macro F1, model export) | `backend/src/soniccaption/audio/`, `algorithms/` (spectral, LPC, VQ, DTW), and automated test suite (`79/79 passing tests`). Report Pages 2 & 3. |
+| **Member 1** | **Audio Signal Processing, Acoustic Intelligence & Copilot Lead** | • `notebooks/01_audio_feature_extraction_pipeline.ipynb` (from-scratch DSP, framing, STFT, Mel, MFCCs, Levinson-Durbin LPC formants, VQ, DTW)<br>• `notebooks/02_environmental_sound_classifier_training.ipynb` (ESC-50 ResNet-18 model training, SpecAugment, 88.75% Val / 80.00% held-out Fold-5 Test accuracy, 0.787 macro F1, model export)<br>• `notebooks/04_acoustic_enhancement_diarization_and_agent.ipynb` (Spectral Subtraction denoising, F0 pitch tracking, VQ speaker diarization, Acoustic-Aware Copilot) | `backend/src/soniccaption/audio/`, `algorithms/` (spectral, LPC, VQ, DTW, enhancement), `services/session_store.py`, `services/agent_service.py`, and full `pytest` suite. Report Pages 2 & 3. |
 | **Member 2** | **Speech Recognition, Sequence Modeling & Timeline Fusion Lead** | • `notebooks/03_speech_recognition_and_sequence_fusion.ipynb` (Silero VAD interval segmentation, Whisper ASR evaluation, Discrete HMM formulation, Viterbi dynamic programming trellis decoding, and chronological timeline fusion) | `backend/src/soniccaption/services/` (Whisper ASR, ResNet sliding-window loader), `audio/vad.py`, `algorithms/hmm.py`, `timeline/fusion.py`. Report Page 4. |
 | **Member 3** | **Full-Stack Product, UI/UX & Deployment Lead** | • Integrates and demonstrates all notebook-proven capabilities in the commercial web product | `frontend/` (React 18, Vite, WaveSurfer.js, Tailwind), `backend/main.py`, `backend/api/`, subtitle exporters (`.srt`, `.vtt`, `.json`), Dockerfile, and Vercel/Spaces deployment. Report Pages 1 & 5 + Screenshots PDF. |
 
@@ -645,8 +645,9 @@ Your objective is to own the foundational audio research, from-scratch DSP trans
 Your assigned scope:
 1. notebooks/01_audio_feature_extraction_pipeline.ipynb: Complete from-scratch DSP pipeline (resampling, framing, Hamming window, FFT, STFT, 40-channel Mel filterbanks, 13 MFCCs + Deltas, Levinson-Durbin LPC formants, VQ, DTW).
 2. notebooks/02_environmental_sound_classifier_training.ipynb: ESC-50 dataset ingestion, DSP feature bridge, SpecAugment, ResNet-18 transfer learning achieving 88.75% Fold-4 validation accuracy and 80.00% strictly held-out Fold-5 test accuracy (0.787 macro F1), model weights export.
-3. backend/src/soniccaption/audio/ and algorithms/: Modular service implementations of all audio DSP transforms.
-4. backend/tests/: Pytest test suite validating numerical stability, silence handling, and algorithm accuracy (17/17 passing tests).
+3. notebooks/04_acoustic_enhancement_diarization_and_agent.ipynb: Boll's Spectral Subtraction denoising, autocorrelation F0 tracking, VQ speaker diarization, and Acoustic-Aware Voice Copilot validation.
+4. backend/src/soniccaption/audio/, algorithms/ (incl. enhancement.py), and services/session_store.py + agent_service.py: Modular product adapters powering live browser mic analysis, SQLite call logs/reminders, and Watch Mode.
+5. backend/tests/: Complete Pytest suite covering DSP, ResNet-18, VAD, ASR, HMM, Fusion, enhancement, SQLite store, and FastAPI endpoints.
 
 Follow the data contracts in core/schemas.py. Do not edit UI or ASR service files.
 ```

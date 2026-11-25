@@ -1,0 +1,52 @@
+{
+  "labels": [
+    "clapping",
+    "coughing",
+    "dog",
+    "door_wood_knock",
+    "footsteps",
+    "glass_breaking",
+    "laughing",
+    "rain",
+    "siren",
+    "sneezing",
+    "background_noise"
+  ],
+  "window_seconds": 2.0,
+  "backbone": "soniccaption_esc50_resnet.pt (Member 1, frozen)",
+  "head": "multinomial logistic regression, C=0.2, class_weight=balanced",
+  "features": "512-d ResNet embedding + [log10 rms, log10 p95 frame rms, dynamic range dB, log10 spectral flatness]",
+  "background_training_classes": [
+    "wind",
+    "vacuum_cleaner",
+    "engine",
+    "airplane",
+    "washing_machine",
+    "sea_waves",
+    "helicopter",
+    "train",
+    "insects",
+    "chainsaw"
+  ],
+  "n_training_windows": 2851,
+  "held_out_metrics": {
+    "protocol": "fit on ESC-50 folds 1-4, evaluate on held-out fold 5 (2 s windows)",
+    "event_accuracy_fold5": 0.7704,
+    "macro_f1_11class_fold5": 0.7732,
+    "background_recall_fold5": 0.9528,
+    "events_mislabelled_as_background_fold5": 0.0856,
+    "leave_one_noise_type_out_background_recall": {
+      "wind": 0.894,
+      "vacuum_cleaner": 0.931,
+      "engine": 0.726,
+      "airplane": 0.969,
+      "washing_machine": 0.919,
+      "sea_waves": 0.535,
+      "helicopter": 0.955,
+      "train": 0.925,
+      "insects": 0.8,
+      "chainsaw": 0.931
+    }
+  },
+  "note": "held_out_metrics come from the folds-1-4 fit; the shipped weights are refit on all folds."
+}

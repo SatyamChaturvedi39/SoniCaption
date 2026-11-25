@@ -1,0 +1,17 @@
+# Exact versions the project was developed and tested with (Python 3.13, Linux x86-64 CPU).
+fastapi==0.165.0
+uvicorn==0.54.0
+websockets==17.4
+python-multipart==0.0.34
+numpy==2.5.5
+scipy==1.18.1
+soundfile==0.14.0
+librosa==1.0.1
+torch==2.15.0
+torchaudio==2.11.1
+silero-vad==6.3
+requests==2.34.2
+faster-whisper==1.2.1
+pytest==9.2.0
+httpx==0.28.1
+scikit-learn==1.9.1

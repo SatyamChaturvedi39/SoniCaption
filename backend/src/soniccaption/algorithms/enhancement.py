@@ -1,7 +1,7 @@
 """
 Acoustic Enhancement, Fundamental Pitch (F0) Estimation & VQ Speaker Diarization.
 
-Member 1 Unit 1-3 DSP Product Extensions:
+Acoustic DSP & Feature Architecture:
 1. Boll's Spectral Subtraction Denoising via Overlap-Add (OLA)
 2. Normalized Autocorrelation Pitch (F0) Contour Tracking
 3. MFCC + F0 + Vector Quantisation (VQ) Speaker Turn Diarization
@@ -14,7 +14,6 @@ from scipy import fft as sp_fft
 
 from soniccaption.audio.preprocessing import frame_signal
 from soniccaption.algorithms.dtw import dtw
-from soniccaption.algorithms.lpc import autocorrelate, levinson_durbin
 from soniccaption.algorithms.spectral import (
     classify_voiced_unvoiced,
     compute_mel_spectrogram,
@@ -173,7 +172,7 @@ def estimate_pitch_contour(
     fmin: float = 75.0,
     fmax: float = 380.0,
 ) -> Dict[str, Any]:
-    """Track fundamental pitch (F0 in Hz) across voiced frames using Unit 1 & 2 cues."""
+    """Track fundamental pitch (F0 in Hz) across voiced frames using autocorrelation & spectral cues."""
     x = np.asarray(samples, dtype=np.float32)
     if x.size == 0:
         return {
@@ -213,66 +212,19 @@ def estimate_pitch_contour(
     }
 
 
-def extract_speaker_embedding(chunk: np.ndarray, sr: int = 16000) -> np.ndarray:
-    """
-    Extracts a balanced 19-dimensional acoustic representation for speaker identification:
-    - 1 dimension: Baseline F0 pitch register (20th percentile on voiced frames), log-normalized.
-      Using P20 eliminates pitch inflation caused by questions or expressive emphasis.
-    - 12 dimensions: Mean MFCCs (coefficients 1..12, excluding c0 frame energy).
-      Represents the speaker's vocal tract transfer function shape.
-    - 6 dimensions: LPC reflection (PARCOR) coefficients (order 8, first 6 coefficients).
-      Represents vocal tract acoustic tube area ratios from Levinson-Durbin recursion.
-    """
-    if len(chunk) < int(0.08 * sr):
-        return np.zeros(19, dtype=np.float32)
-
-    # 1. Fundamental pitch register
-    pitch = estimate_pitch_contour(chunk, sr=sr)
-    f0_arr = np.array(pitch.get("f0_hz", []), dtype=np.float32)
-    voiced_f0 = f0_arr[f0_arr > 0]
-    if len(voiced_f0) > 0:
-        f0_base = float(np.percentile(voiced_f0, 20))
-    else:
-        f0_base = 120.0
-    f0_feat = float(np.log(max(f0_base, 50.0) / 100.0) * 0.75)
-
-    # 2. MFCCs 1..12 (vocal tract envelope)
-    mfcc, _, _ = compute_mfcc(chunk, sr=sr, n_mfcc=13, n_mels=32)
-    if mfcc.shape[1] > 0:
-        mfcc_mean = np.mean(mfcc[1:13], axis=1)
-    else:
-        mfcc_mean = np.zeros(12, dtype=np.float32)
-    mfcc_feat = (mfcc_mean / 12.0).astype(np.float32)
-
-    # 3. LPC Reflection Coefficients 1..6 (vocal tract geometry)
-    r = autocorrelate(chunk, 8)
-    _, k_coeffs, _ = levinson_durbin(r, 8)
-    k_feat = (k_coeffs[:6] * 0.8).astype(np.float32)
-
-    return np.concatenate([[f0_feat], mfcc_feat, k_feat]).astype(np.float32)
-
-
 def diarize_speakers(
     samples: np.ndarray,
     speech_segments: List[Dict[str, Any]],
     sr: int = 16000,
     max_speakers: int = 2,
-    speaker_mode: str = "auto",
 ) -> List[Dict[str, Any]]:
     """
     Assign speaker labels ('Speaker 1', 'Speaker 2', ...) to speech segments
-    using Member 1's MFCC + F0 pitch baseline + LPC reflection coefficients
-    clustered via K-Means Vector Quantisation (VQ).
-
-    Supports:
-    - speaker_mode='1' or 'single': Guarantees 100% of speech is assigned to 'Speaker 1'.
-    - speaker_mode='2' or 'dialogue': Forces partitioning into 2 distinct speaker clusters.
-    - speaker_mode='auto': Automatically tests between-cluster centroid separation
-      against natural intra-speaker variance to prevent false splitting of solo speakers.
+    using Member 1's MFCC + F0 pitch embeddings clustered via K-Means VQ.
     """
     if not speech_segments:
         return []
-    if len(speech_segments) == 1 or max_speakers <= 1 or speaker_mode in ("1", "single"):
+    if len(speech_segments) == 1 or max_speakers <= 1:
         return [{**seg, "speaker": "Speaker 1"} for seg in speech_segments]
 
     x = np.asarray(samples, dtype=np.float32)
@@ -283,9 +235,16 @@ def diarize_speakers(
         s_idx = max(0, int(round(float(seg["start"]) * sr)))
         e_idx = min(len(x), int(round(float(seg["end"]) * sr)))
         chunk = x[s_idx:e_idx]
-        if chunk.size < int(0.08 * sr):
+        if chunk.size < int(0.15 * sr):
             continue
-        emb = extract_speaker_embedding(chunk, sr=sr)
+        # Use un-CMS-zeroed log-Mel bands (summarized into 8 coarse spectral bands) + log F0 pitch
+        _, _, mel = compute_mel_spectrogram(chunk, sr=sr, n_mels=24, n_fft=512, hop_length=160, frame_length=400)
+        mel_mean = np.mean(mel, axis=1)
+        mel_norm = (mel_mean - np.mean(mel_mean)) / (np.std(mel_mean) + 1e-6)
+        bands = np.mean(mel_norm.reshape(8, 3), axis=1)
+        pitch = estimate_pitch_contour(chunk, sr=sr)
+        f0_feat = np.log1p(pitch["mean_f0_hz"]) * 3.0
+        emb = np.concatenate([bands, [f0_feat]]).astype(np.float32)
         embeddings.append(emb)
         valid_indices.append(idx)
 
@@ -293,33 +252,16 @@ def diarize_speakers(
         return [{**seg, "speaker": "Speaker 1"} for seg in speech_segments]
 
     feat_mat = np.vstack(embeddings)
-    vq_res = kmeans_vq(feat_mat, k=min(max_speakers, len(embeddings), 2), max_iter=30, seed=42)
+    vq_res = kmeans_vq(feat_mat, k=min(max_speakers, len(embeddings)), max_iter=30, seed=42)
 
-    # Evaluate cluster separation
+    # Guard against over-splitting single-speaker audio
     if vq_res.codebook.shape[0] >= 2:
         centroid_dist = float(np.linalg.norm(vq_res.codebook[0] - vq_res.codebook[1]))
-        intra_dist = float(
-            np.mean([
-                np.linalg.norm(feat_mat[i] - vq_res.codebook[int(vq_res.quantized_indices[i])])
-                for i in range(len(feat_mat))
-            ])
-        )
-        separation_ratio = centroid_dist / (intra_dist + 1e-5)
     else:
         centroid_dist = 0.0
-        separation_ratio = 0.0
 
     assigned = ["Speaker 1"] * len(speech_segments)
-    is_multi_speaker = False
-    if speaker_mode in ("2", "dialogue"):
-        is_multi_speaker = True
-    elif speaker_mode == "auto":
-        # Centroid distance >= 0.35 and separation ratio >= 2.5 separates true multi-speaker
-        # dialogue from natural single-speaker pitch and emphasis modulations.
-        if centroid_dist >= 0.35 and separation_ratio >= 2.5:
-            is_multi_speaker = True
-
-    if is_multi_speaker:
+    if centroid_dist >= 1.5:
         # Chronological label mapping so first speaker encountered is always Speaker 1
         cluster_map: Dict[int, str] = {}
         for pos, orig_idx in enumerate(valid_indices):
@@ -384,7 +326,7 @@ def analyze_segment_prosody(
     speech_segments: List[Dict[str, Any]],
     sr: int = 16000,
 ) -> List[Dict[str, Any]]:
-    """Compute Unit 1-2 vocal delivery cues (F0 slope, RMS stress ratio, speech rate) per segment."""
+    """Compute vocal delivery cues (F0 slope, RMS stress ratio, speech rate) per segment."""
     if not speech_segments:
         return []
     x = np.asarray(samples, dtype=np.float32)
@@ -447,7 +389,7 @@ def subsequence_dtw_search(
     sr: int = 16000,
     top_k: int = 3,
 ) -> List[Dict[str, Any]]:
-    """Unit 3 Query-by-Example: locate occurrences of a spoken word/sound query inside target audio via DTW over MFCCs."""
+    """Query-by-Example: locate occurrences of a spoken word/sound query inside target audio via DTW over MFCCs."""
     q = np.asarray(query_samples, dtype=np.float32)[: sr * 6]
     t = np.asarray(target_samples, dtype=np.float32)[: sr * 60]
     if q.size < 800 or t.size < 800:

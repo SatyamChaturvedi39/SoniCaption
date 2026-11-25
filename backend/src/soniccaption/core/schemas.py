@@ -44,7 +44,7 @@ class SpectralFeatures:
 
 @dataclass
 class LPCResult:
-    """Linear Predictive Coding analysis results (Unit 2)."""
+    """Linear Predictive Coding analysis results."""
     order: int
     lpc_coefficients: np.ndarray  # (order + 1,) a[0] = 1.0, a[1..p]
     reflection_coefficients: np.ndarray  # (order,) PARCOR k_1 .. k_p
@@ -57,7 +57,7 @@ class LPCResult:
 
 @dataclass
 class VQResult:
-    """Vector Quantisation codebook and quantization metrics (Unit 2)."""
+    """Vector Quantisation codebook and quantization metrics."""
     codebook: np.ndarray  # (K, D) cluster centroids / codewords
     quantized_indices: np.ndarray  # (N,) index of nearest codeword for each vector
     distortion: float  # Mean squared quantization error
@@ -67,7 +67,7 @@ class VQResult:
 
 @dataclass
 class DTWResult:
-    """Dynamic Time Warping sequence alignment result (Unit 3)."""
+    """Dynamic Time Warping sequence alignment result."""
     distance: float  # Total accumulated alignment cost D(N-1, M-1)
     normalized_distance: float  # Total cost divided by alignment path length
     path_length: int

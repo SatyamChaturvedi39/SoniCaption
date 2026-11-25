@@ -5,9 +5,9 @@
  */
 
 export const RAW_MIC_CONSTRAINTS: MediaTrackConstraints = {
-  echoCancellation: false,
+  echoCancellation: true,
   noiseSuppression: false,
-  autoGainControl: false,
+  autoGainControl: true,
   channelCount: 1,
 }
 
@@ -106,6 +106,18 @@ export async function blobToWavFile(blob: Blob, baseName = 'mic-recording'): Pro
     src.start(0)
     const rendered = await offline.startRendering()
     const mono = rendered.getChannelData(0)
+    // Soft boost faint microphone signals so VAD and speech recognition receive optimal level
+    let maxAbs = 0
+    for (let i = 0; i < mono.length; i++) {
+      const a = Math.abs(mono[i])
+      if (a > maxAbs) maxAbs = a
+    }
+    if (maxAbs > 0.001 && maxAbs < 0.45) {
+      const boost = Math.min(5.0, 0.72 / maxAbs)
+      for (let i = 0; i < mono.length; i++) {
+        mono[i] = mono[i] * boost
+      }
+    }
     const wavBytes = encodePcm16Wav(mono, targetSr)
     return new File([wavBytes], `${baseName}-${Date.now()}.wav`, { type: 'audio/wav' })
   } finally {

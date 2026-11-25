@@ -53,6 +53,7 @@ try:
     from soniccaption.audio.io import generate_synthetic_signal, load_audio
     from soniccaption.audio.preprocessing import frame_signal
     from soniccaption.audio.vad import detect_speech, speech_ratio as compute_speech_ratio
+    from soniccaption.algorithms.authenticator import detect_synthetic_voice
     from soniccaption.algorithms.dtw import dtw
     from soniccaption.algorithms.enhancement import (
         analyze_segment_prosody,
@@ -202,7 +203,7 @@ def _build_signal_diagnostics(
     den_res: Dict[str, Any],
     pitch: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Compute inline Units 1-2 acoustic & spectral diagnostics on real clip audio."""
+    """Compute inline acoustic & spectral diagnostics on real clip audio."""
     raw_seg = raw[: sr * 5]
     den_seg = denoised[: sr * 5]
     frames, _ = frame_signal(den_seg, 400, 160)
@@ -234,8 +235,13 @@ def _build_signal_diagnostics(
     }
 
 
-def _transcribe_with_vad_fallback(wav_path: str, vad_segments: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], str, Optional[str], List[str]]:
-    if not vad_segments:
+def _transcribe_with_vad_fallback(
+    wav_path: str,
+    vad_segments: List[Dict[str, Any]],
+    active_samples: Optional[np.ndarray] = None,
+) -> tuple[List[Dict[str, Any]], str, Optional[str], List[str]]:
+    clip_rms = float(np.sqrt(np.mean(active_samples ** 2))) if active_samples is not None and active_samples.size else 0.0
+    if not vad_segments and clip_rms < 0.001:
         return [], "silero-vad-none", None, ["No speech detected above ambient noise floor."]
     warnings: List[str] = []
     try:
@@ -260,7 +266,6 @@ def _run_multimodal_core(
     filename: str,
     denoise: bool = True,
     model_source: str = "resnet",
-    speaker_mode: str = "auto",
 ) -> Dict[str, Any]:
     """Execute end-to-end Member 1 DSP + Member 2 VAD/ASR/Sound/Fusion pipeline."""
     audio_data = load_audio(wav_path, target_sr=16000, to_mono=True, normalize_peak=False)
@@ -284,13 +289,13 @@ def _run_multimodal_core(
         temp_asr_paths.append(asr_wav_path)
         sf.write(asr_wav_path, active_samples, sample_rate, subtype="PCM_16")
     try:
-        raw_speech, speech_source, detected_lang, asr_warnings = _transcribe_with_vad_fallback(asr_wav_path, vad_segments)
+        raw_speech, speech_source, detected_lang, asr_warnings = _transcribe_with_vad_fallback(asr_wav_path, vad_segments, active_samples)
     finally:
         _cleanup_files(temp_asr_paths)
     asr_time_ms = round((time.perf_counter() - t_asr) * 1000, 1)
 
     pitch_stats = estimate_pitch_contour(active_samples, sr=sample_rate)
-    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=2, speaker_mode=speaker_mode)
+    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=2)
     prosody_speech = analyze_segment_prosody(active_samples, diarized_speech, sr=sample_rate)
 
     t_cnn = time.perf_counter()
@@ -298,7 +303,7 @@ def _run_multimodal_core(
         active_samples,
         sample_rate,
         threshold=0.0,
-        silence_rms=0.012,
+        silence_rms=0.003,
         ignore_ambient=True,
         model_source=model_source,
     )
@@ -313,7 +318,7 @@ def _run_multimodal_core(
     )
     timeline = fused["timeline"]
 
-    # Map speaker identity & Unit 1-2 vocal delivery cues back onto chronological speech items
+    # Map speaker identity & vocal delivery cues back onto chronological speech items
     spk_idx = 0
     for item in timeline:
         if item["category"] == "speech":
@@ -360,6 +365,7 @@ def _run_multimodal_core(
     prosody_hmm = decode_prosody_hmm(speech_segments, duration, step_s=1.0)
     mfcc_signature = extract_clip_signature(active_samples, sr=sample_rate)
     diagnostics = _build_signal_diagnostics(raw_samples, denoise_info["denoised"], sample_rate, denoise_info, pitch=pitch_stats)
+    voice_authenticity = detect_synthetic_voice(active_samples, sr=sample_rate)
 
     LAST_AUDIO_CONTEXT.clear()
     LAST_AUDIO_CONTEXT.update(
@@ -390,6 +396,7 @@ def _run_multimodal_core(
         "prosody_hmm": prosody_hmm,
         "mfcc_signature": mfcc_signature,
         "diagnostics": diagnostics,
+        "voice_authenticity": voice_authenticity,
         "speech_segments": speech_segments,
         "sound_events": sound_events,
         "timeline": timeline,
@@ -419,7 +426,6 @@ async def analyze_audio(
     source_type: str = Form("upload"),
     model_source: str = Form("resnet"),
     save_log: bool = Form(True),
-    speaker_mode: str = Form("auto"),
 ):
     ext = _validate_audio_ext(file.filename)
     data = await _read_upload_bytes(file)
@@ -435,13 +441,7 @@ async def analyze_audio(
     cleanup_paths: List[str] = []
     try:
         wav_path, cleanup_paths = _write_temp_wav(data, ext)
-        res = _run_multimodal_core(
-            wav_path,
-            file.filename or "audio.wav",
-            denoise=denoise,
-            model_source=model_source,
-            speaker_mode=speaker_mode,
-        )
+        res = _run_multimodal_core(wav_path, file.filename or "audio.wav", denoise=denoise, model_source=model_source)
 
         insights = agent_service.extract_session_insights(
             res["speech_segments"],
@@ -477,6 +477,7 @@ async def analyze_audio(
             "prosody_hmm": res["prosody_hmm"],
             "mfcc_signature": res["mfcc_signature"],
             "diagnostics": res["diagnostics"],
+            "voice_authenticity": res.get("voice_authenticity", {}),
         }
 
         prior_sessions = session_store.list_sessions(limit=25)
@@ -537,6 +538,7 @@ async def analyze_audio(
             "speech_segments": res["speech_segments"],
             "sound_events": res["sound_events"],
             "timeline": res["timeline"],
+            "voice_authenticity": res.get("voice_authenticity", {}),
             "metrics": metrics,
         }
     except HTTPException:
@@ -557,7 +559,7 @@ async def query_audio_dtw(
     file: UploadFile = File(...),
     denoise: bool = Form(True),
 ):
-    """Unit 3 Query-by-Example Spoken Keyword / Sound Spotter using Subsequence DTW over MFCCs."""
+    """Query-by-Example Spoken Keyword / Sound Spotter using Subsequence DTW over MFCCs."""
     if not HAS_LIVE_MODEL:
         raise HTTPException(status_code=503, detail="Live ML pipeline unavailable.")
     target_samples = LAST_AUDIO_CONTEXT.get("active_samples")
@@ -580,6 +582,35 @@ async def query_audio_dtw(
             "query_duration": round(float(q_audio.duration), 2),
             "matches": matches,
         }
+    finally:
+        _cleanup_files(cleanup_paths)
+
+
+@app.post("/api/v1/voice/authenticate")
+async def authenticate_voice_clip(
+    file: UploadFile = File(...),
+    denoise: bool = Form(True),
+):
+    """Forensic AI-generated / deepfake synthetic voice detector."""
+    if not HAS_LIVE_MODEL:
+        raise HTTPException(status_code=503, detail="Live pipeline unavailable.")
+    ext = _validate_audio_ext(file.filename)
+    data = await _read_upload_bytes(file)
+    if not data:
+        raise HTTPException(status_code=400, detail="Audio file is empty.")
+
+    cleanup_paths: List[str] = []
+    try:
+        wav_path, cleanup_paths = _write_temp_wav(data, ext)
+        audio_data = load_audio(wav_path, target_sr=16000, to_mono=True, normalize_peak=False)
+        samples = audio_data.samples
+        if denoise:
+            den = spectral_subtraction_denoise(samples, sr=16000)
+            samples = den["denoised"]
+        res = detect_synthetic_voice(samples, sr=16000)
+        res["filename"] = file.filename
+        res["duration"] = round(float(audio_data.duration), 2)
+        return res
     finally:
         _cleanup_files(cleanup_paths)
 
@@ -719,15 +750,15 @@ async def watch_ambient_chunk(
 
         rms = float(np.sqrt(np.mean(active ** 2))) if active.size else 0.0
         rms_db = round(float(20.0 * np.log10(max(rms, 1e-6))), 1)
-        vad_floor = max(0.010, baseline_rms * 1.45) if baseline_rms > 0 else 0.010
+        vad_floor = max(0.002, baseline_rms * 1.05) if baseline_rms > 0 else 0.002
         vad_segs = detect_speech(active, 16000, min_segment_rms=vad_floor)
         events = detect_sound_events(
             active,
             16000,
             window_s=2.0,
             hop_s=0.5,
-            threshold=0.60,
-            silence_rms=0.012,
+            threshold=0.50,
+            silence_rms=0.003,
             ignore_ambient=True,
             baseline_rms=baseline_rms,
             model_source=model_source,

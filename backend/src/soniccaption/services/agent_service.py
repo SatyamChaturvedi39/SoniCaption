@@ -163,7 +163,7 @@ def _heuristic_notes_and_actions(
             }
         )
 
-    # Extract Unit 1-2 acoustic emphasis / question moments directly from vocal delivery
+    # Extract acoustic emphasis & question moments directly from vocal delivery
     for seg in speech_segments or []:
         style = str(seg.get("delivery_style", ""))
         txt = str(seg.get("text", "")).strip()

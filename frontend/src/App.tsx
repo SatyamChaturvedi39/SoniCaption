@@ -8,21 +8,21 @@ import {
   ChevronUp,
   Download,
   FileAudio,
-  History,
   Info,
   Mic,
   Radio,
+  ShieldCheck,
   Square,
   Upload,
 } from 'lucide-react'
-import { analyzeAudio, exportResult, getHealth, getReminders, getSimilarSessions, queryAudioByVoice } from './api'
-import { AgentView, EngineSpecsModal, HistoryAndRemindersView, WatchView } from './components/StudioTabs'
+import { analyzeAudio, exportResult, getHealth, getSimilarSessions, queryAudioByVoice } from './api'
+import { AgentView, EngineSpecsModal, VoiceAuthenticatorView, WatchView } from './components/StudioTabs'
 import { DualLineCanvas, SpectrogramCanvas } from './components/VisualCanvas'
 import { WavePlayer } from './components/WavePlayer'
 import type { Analysis, DtwSpotMatch } from './types'
 import { RAW_MIC_CONSTRAINTS, blobToWavFile } from './utils/wavEncoder'
 
-type Tab = 'workspace' | 'agent' | 'watch' | 'history'
+type Tab = 'workspace' | 'authenticator' | 'watch' | 'agent'
 
 const STAGES = [
   'Running Spectral Subtraction DSP...',
@@ -36,8 +36,6 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('workspace')
   const [inputMode, setInputMode] = useState<'record' | 'upload'>('upload')
   const [denoise, setDenoise] = useState(true)
-  const [modelSource, setModelSource] = useState<'resnet' | 'hf-cnn'>('resnet')
-  const [speakerMode, setSpeakerMode] = useState<'auto' | 'single' | 'dialogue'>('auto')
   const [recording, setRecording] = useState(false)
   const [seconds, setSeconds] = useState(0)
   const [processing, setProcessing] = useState(false)
@@ -47,8 +45,6 @@ export default function App() {
   const [audioUrl, setAudioUrl] = useState('')
   const [result, setResult] = useState<Analysis | null>(null)
   const [health, setHealth] = useState<any>(null)
-  const [pendingCount, setPendingCount] = useState(0)
-  const [refreshKey, setRefreshKey] = useState(0)
   const [seekTo, setSeekTo] = useState<{ time: number; seq: number } | null>(null)
   const [showSpecs, setShowSpecs] = useState(false)
   const [drag, setDrag] = useState(false)
@@ -60,10 +56,6 @@ export default function App() {
 
   const reloadMeta = () => {
     getHealth().then(setHealth).catch(() => setHealth(null))
-    getReminders()
-      .then((r) => setPendingCount(r.reminders.filter((x) => x.status === 'pending').length))
-      .catch(() => { })
-    setRefreshKey((k: number) => k + 1)
   }
 
   useEffect(() => { reloadMeta() }, [])
@@ -136,8 +128,6 @@ export default function App() {
       const data = await analyzeAudio(file, {
         denoise,
         sourceType: inputMode === 'record' ? 'mic_recording' : 'upload',
-        modelSource,
-        speakerMode,
       })
       setResult(data)
       setTab('workspace')
@@ -152,39 +142,38 @@ export default function App() {
 
   const fmt = (s: number) => `${Math.floor(s / 60).toString().padStart(2, '0')}:${Math.floor(s % 60).toString().padStart(2, '0')}`
   const isLive = health?.mode === 'live'
-  const nav: [Tab, string, any, number?][] = [
-    ['workspace', 'Intelligence Studio', AudioLines],
-    ['agent', 'AI Copilot & Auditor', Bot],
-    ['watch', 'Live Monitor', Radio],
-    ['history', 'Archive & Analytics', History, pendingCount],
+  const nav: [Tab, string, any][] = [
+    ['workspace', 'Audio Studio', AudioLines],
+    ['authenticator', 'AI Voice Authenticator', ShieldCheck],
+    ['watch', 'Live Room Radar', Radio],
+    ['agent', 'Voice Copilot', Bot],
   ]
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><AudioLines size={20} /></div>
-          <div><b>SonicPulse</b><small>Acoustic Intelligence Studio</small></div>
+          <div className="brand-mark"><AudioLines size={18} /></div>
+          <div><b>SonicVoice Studio</b><small>Acoustic Intelligence</small></div>
         </div>
 
-        <div className="nav-label">Studio Workspaces</div>
-        {nav.map(([id, label, Icon, badge]) => (
+        <div className="nav-label">Workspace</div>
+        {nav.map(([id, label, Icon]) => (
           <button key={id} className={`nav-item ${tab === id ? 'active' : ''}`} onClick={() => { setTab(id); setError('') }}>
             <Icon size={16} />
             <span>{label}</span>
-            {badge ? <em className="nav-badge">{badge}</em> : null}
           </button>
         ))}
 
         <div className="sidebar-bottom">
           <button className="secondary-btn" style={{ width: '100%', justifyContent: 'center' }} onClick={() => setShowSpecs(true)}>
-            <Info size={14} /> Engine &amp; Model Specs
+            <Info size={14} /> Engine Architecture
           </button>
           <div className="status-line">
             <span className={`status-dot ${isLive ? 'live' : ''}`} />
-            <span style={{ color: isLive ? '#10b981' : '#f43f5e' }}>{isLive ? 'Engine Pipeline Live' : 'Backend Offline'}</span>
+            {isLive ? 'Backend Live' : 'Backend Offline'}
           </div>
-          <div className="mono" style={{ fontSize: 10, color: '#94a3b8' }}>
+          <div className="mono" style={{ fontSize: 10, color: '#64748b' }}>
             ASR: {health?.groq_configured ? 'Groq Whisper v3' : 'Silero VAD fallback'}
           </div>
         </div>
@@ -194,12 +183,12 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-title">
             <h1>{nav.find((n) => n[0] === tab)?.[1]}</h1>
-            <span className="topbar-sub">Multimodal Speech &amp; Acoustic Signal Intelligence · Units 1–4 Integrated</span>
+            <span className="topbar-sub">Prosody-Aware Transcription, Spoken DTW Retrieval &amp; Ambient Event Intelligence</span>
           </div>
           <div className="topbar-meta">
             <span className={`tag ${isLive ? 'ok' : ''}`}>{isLive ? 'Models + VAD Ready' : 'Mock Fallback'}</span>
-            <span className={`tag ${health?.groq_configured ? 'emerald' : 'warn'}`}>
-              {health?.groq_configured ? 'Groq LLaMA-3 + Whisper Ready' : 'Set GROQ_API_KEY in .env'}
+            <span className={`tag ${health?.groq_configured ? 'ok' : 'warn'}`}>
+              {health?.groq_configured ? 'GROQ_API_KEY Loaded (.env)' : 'Set GROQ_API_KEY in .env'}
             </span>
           </div>
         </header>
@@ -211,31 +200,10 @@ export default function App() {
             {!result ? (
               <>
                 <div className="metric-strip">
-                  <div className="metric-cell">
-                    <small>Acoustic Model</small>
-                    <b style={{ color: modelSource === 'resnet' ? '#06b6d4' : '#a855f7' }}>
-                      {modelSource === 'hf-cnn' ? 'Member 2: 4-Block CNN' : 'Member 1: ResNet-18'}
-                    </b>
-                  </div>
-                  <div className="metric-cell">
-                    <small>Speech Transcriber</small>
-                    <b style={{ color: '#10b981' }}>{health?.groq_configured ? 'Groq Whisper v3' : 'VAD Fallback'}</b>
-                  </div>
-                  <div className="metric-cell">
-                    <small>Acoustic DSP Units 1–4</small>
-                    <b>Boll OLA · LPC Formants · DTW · HMM</b>
-                  </div>
-                  <div className="metric-cell">
-                    <small>Active Bookmarks</small>
-                    <b>{pendingCount}</b>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-                  <span className="tag ok mono">🎯 High-Stakes Lecture &amp; Voice Intelligence</span>
-                  <span className="tag purple mono">★ Expressive Vocal Stress Radar</span>
-                  <span className="tag emerald mono">⚡ Query-by-Voice Subsequence DTW</span>
-                  <span className="tag mono">🔍 Discrete HMM Discourse Decoder</span>
+                  <div className="metric-cell"><small>Acoustic Engine</small><b>SonicAcousticResNet-18</b></div>
+                  <div className="metric-cell"><small>Speech Engine</small><b>{health?.groq_configured ? 'Groq Whisper v3' : 'VAD Fallback'}</b></div>
+                  <div className="metric-cell"><small>DSP Pipeline</small><b>Spectral OLA · LPC · DTW · HMM</b></div>
+                  <div className="metric-cell"><small>Acoustic Analysis</small><b>F0 Pitch &amp; Prosody</b></div>
                 </div>
 
                 <div className="panel">
@@ -244,39 +212,17 @@ export default function App() {
                       <button className={inputMode === 'upload' ? 'selected' : ''} onClick={() => { setInputMode('upload'); setFile(null); setAudioUrl('') }}><Upload size={14} /> Upload Audio</button>
                       <button className={inputMode === 'record' ? 'selected' : ''} onClick={() => { setInputMode('record'); setFile(null); setAudioUrl('') }}><Mic size={14} /> Record Microphone</button>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                      <select
-                        className="input-field"
-                        style={{ width: 'auto', padding: '6px 10px', fontSize: 12 }}
-                        value={modelSource}
-                        onChange={(e) => setModelSource(e.target.value as 'resnet' | 'hf-cnn')}
-                      >
-                        <option value="resnet">Member 1: ResNet-18 (Local)</option>
-                        <option value="hf-cnn">Member 2: 4-Block CNN (HF)</option>
-                      </select>
-                      <select
-                        className="input-field"
-                        style={{ width: 'auto', padding: '6px 10px', fontSize: 12 }}
-                        value={speakerMode}
-                        onChange={(e) => setSpeakerMode(e.target.value as 'auto' | 'single' | 'dialogue')}
-                        title="Speaker Diarization Mode"
-                      >
-                        <option value="auto">Auto Diarize (1–2 Speakers)</option>
-                        <option value="single">Single Speaker (Solo Lecture)</option>
-                        <option value="dialogue">2 Speakers (Dialogue / Call)</option>
-                      </select>
-                      <label className="toggle-chip">
-                        <input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} />
-                        Spectral Subtraction Denoise
-                      </label>
-                    </div>
+                    <label className="toggle-chip">
+                      <input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} />
+                      Spectral Subtraction Denoise
+                    </label>
                   </div>
 
                   {inputMode === 'record' ? (
                     <div className="record-box">
                       <div className={`mic-badge ${recording ? 'live' : ''}`}><Mic size={22} /></div>
                       <h3>{recording ? 'Recording Audio...' : file ? 'Recording Ready (16 kHz WAV)' : 'Capture Speech & Ambient Events'}</h3>
-                      <p className="muted" style={{ margin: '4px 0 0' }}>Speak naturally or trigger sounds (clapping, door knock, coughing, laughing). Converted automatically to PCM WAV.</p>
+                      <p className="muted" style={{ margin: '4px 0 0' }}>Speak naturally or produce foreground sounds (clapping, knocking, laughter). Recorded at raw 16 kHz PCM.</p>
                       <div className="record-clock">{fmt(seconds)}</div>
                       {!recording ? (
                         <button className="primary-btn" onClick={startRecording}><Mic size={15} /> Start Recording</button>
@@ -304,7 +250,7 @@ export default function App() {
                   {file && (
                     <div className="list-card" style={{ marginTop: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <FileAudio size={17} color="#0f766e" />
+                        <FileAudio size={18} color="#06b6d4" />
                         <div><b>{file.name}</b> <span className="muted mono">({(file.size / 1024).toFixed(1)} KB)</span></div>
                       </div>
                       <button className="secondary-btn" onClick={() => { setFile(null); setAudioUrl('') }}>Clear</button>
@@ -357,18 +303,9 @@ export default function App() {
           </div>
         )}
 
-        {tab === 'agent' && <AgentView onRemindersChanged={reloadMeta} />}
+        {tab === 'authenticator' && <VoiceAuthenticatorView />}
         {tab === 'watch' && <WatchView onAlertLogged={reloadMeta} />}
-        {tab === 'history' && (
-          <HistoryAndRemindersView
-            refreshKey={refreshKey}
-            onOpenSession={(sess) => {
-              setResult(sess)
-              setAudioUrl('')
-              setTab('workspace')
-            }}
-          />
-        )}
+        {tab === 'agent' && <AgentView />}
       </main>
 
       {showSpecs && <EngineSpecsModal onClose={() => setShowSpecs(false)} />}
@@ -453,7 +390,7 @@ function ResultsView({
 
   return (
     <div>
-      <div className="row-between" style={{ marginBottom: 14 }}>
+      <div className="row-between" style={{ marginBottom: 16 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: 19 }}>{data.filename}</h2>
           <span className="muted mono">Log #{data.session_id ?? '—'} · {data.duration.toFixed(2)}s · {data.metrics?.model_architecture || 'ResNet-18'} · ASR: {data.metrics?.speech_source || 'live'}</span>
@@ -470,10 +407,43 @@ function ResultsView({
 
       {warnings.length > 0 && <div className="notice-bar">{warnings.join(' ')}</div>}
 
+      {data.metrics?.voice_authenticity && data.metrics.voice_authenticity.verdict && (
+        <section
+          className="panel"
+          style={{
+            background: data.metrics.voice_authenticity.is_synthetic
+              ? 'rgba(239, 68, 68, 0.08)'
+              : data.metrics.voice_authenticity.authenticity_score >= 68
+              ? 'rgba(16, 185, 129, 0.08)'
+              : 'rgba(245, 158, 11, 0.08)',
+            borderColor: data.metrics.voice_authenticity.is_synthetic
+              ? 'rgba(239, 68, 68, 0.4)'
+              : data.metrics.voice_authenticity.authenticity_score >= 68
+              ? 'rgba(16, 185, 129, 0.4)'
+              : 'rgba(245, 158, 11, 0.4)',
+          }}
+        >
+          <div className="row-between">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <ShieldCheck size={20} color={data.metrics.voice_authenticity.is_synthetic ? '#ef4444' : '#10b981'} />
+              <div>
+                <b>Voice Authenticity: {data.metrics.voice_authenticity.verdict}</b>
+                <div className="muted mono">
+                  Authenticity: {data.metrics.voice_authenticity.authenticity_score}% · Jitter: {data.metrics.voice_authenticity.metrics?.jitter_percent}% · Shimmer: {data.metrics.voice_authenticity.metrics?.shimmer_db} dB
+                </div>
+              </div>
+            </div>
+            <span className={`tag ${data.metrics.voice_authenticity.is_synthetic ? 'warn' : 'ok'}`}>
+              {data.metrics.voice_authenticity.is_synthetic ? 'AI Vocoder Signature' : 'Natural Human Vocal Tract'}
+            </span>
+          </div>
+        </section>
+      )}
+
       {data.summary && (
         <section className="panel">
-          <div className="panel-header"><h3>Multimodal Synthesis &amp; Vocal Highlights</h3></div>
-          <p style={{ margin: '0 0 12px', fontSize: 13.5, lineHeight: 1.55 }}>{data.summary}</p>
+          <div className="panel-header"><h3>Multimodal Audio Synthesis &amp; Key Spoken Highlights</h3></div>
+          <p style={{ margin: '0 0 14px', fontSize: 13.5, lineHeight: 1.6, color: '#e2e8f0' }}>{data.summary}</p>
           {highlights.length > 0 ? (
             highlights.map((r, i) => (
               <div key={i} className="reminder-row">
@@ -481,23 +451,14 @@ function ResultsView({
                 <span className="tag">{r.trigger_source}</span>
               </div>
             ))
-          ) : (
-            <span className="muted">No key vocal emphasis highlights or urgent alerts extracted.</span>
-          )}
+          ) : null}
         </section>
       )}
 
       {audioUrl && (
         <section className="panel">
-          <div className="panel-header" style={{ marginBottom: 12 }}>
-            <div>
-              <h3>Interactive Audio Waveform &amp; Multi-Track Timeline</h3>
-              <p className="muted" style={{ margin: '2px 0 0' }}>
-                Seek audio playback dynamically. Color-coded tracks show speaker turns (cyan), vocal emphasis stress (purple), and environmental acoustic events (amber).
-              </p>
-            </div>
-          </div>
-          <WavePlayer audioUrl={audioUrl} seekTo={seekTo} timeline={data.timeline} onSeek={onSeek} />
+          <h3 style={{ marginBottom: 12 }}>Waveform Scrub Player</h3>
+          <WavePlayer audioUrl={audioUrl} seekTo={seekTo} />
         </section>
       )}
 
@@ -505,10 +466,10 @@ function ResultsView({
         <div className="panel-header">
           <div>
             <h3>Chronological Caption &amp; Prosody Timeline</h3>
-            <p className="muted" style={{ margin: '2px 0 0' }}>Click any row to seek playback. Speech rows include Unit 1–2 vocal pitch &amp; stress delivery tags.</p>
+            <p className="muted" style={{ margin: '2px 0 0' }}>Click any row to seek playback. Speech rows include vocal pitch &amp; prosody delivery tags.</p>
           </div>
           <div className="export-bar">
-            <Download size={14} color="#71717a" />
+            <Download size={14} color="#94a3b8" />
             {['srt', 'vtt', 'json', 'csv', 'txt'].map((f) => (
               <button key={f} onClick={() => exportResult(f, data).catch(() => alert('Export failed'))}>
                 .{f}
@@ -544,8 +505,8 @@ function ResultsView({
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h3>Query-by-Voice Acoustic Spotter (Unit 3 Subsequence DTW)</h3>
-            <p className="muted" style={{ margin: '2px 0 0' }}>Speak a word, name, or sound to locate its closest MFCC matches inside this recording—works even without text matching.</p>
+            <h3>Query-by-Voice Acoustic Spotter (Subsequence DTW)</h3>
+            <p className="muted" style={{ margin: '2px 0 0' }}>Speak a word, name, or sound to locate its closest acoustic MFCC matches inside this recording—works even without text matching.</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className={spotRec ? 'danger-btn' : 'primary-btn'} onClick={toggleSpotMic} disabled={spotBusy}>
@@ -580,11 +541,11 @@ function ResultsView({
       {(sceneHmm?.best_path?.length > 0 || prosodyHmm?.best_path?.length > 0) && (
         <section className="panel">
           {sceneHmm?.best_path?.length > 0 && (
-            <div style={{ marginBottom: prosodyHmm?.best_path?.length > 0 ? 14 : 0 }}>
+            <div style={{ marginBottom: prosodyHmm?.best_path?.length > 0 ? 16 : 0 }}>
               <div className="panel-header" style={{ marginBottom: 8 }}>
                 <div>
-                  <h3>Acoustic Scene Flow (Unit 4 HMM Viterbi)</h3>
-                  <p className="muted" style={{ margin: '2px 0 0' }}>Scene states per {sceneHmm.step_s}s window (`log P = {sceneHmm.log_likelihood?.toFixed(2)}`).</p>
+                  <h3>Acoustic Scene Flow (Markov Viterbi)</h3>
+                  <p className="muted" style={{ margin: '2px 0 0' }}>Scene states per {sceneHmm.step_s}s window (log P = {sceneHmm.log_likelihood?.toFixed(2)}).</p>
                 </div>
               </div>
               <div className="tag-row">
@@ -600,8 +561,8 @@ function ResultsView({
             <div>
               <div className="panel-header" style={{ marginBottom: 8 }}>
                 <div>
-                  <h3>Discourse &amp; Vocal Emphasis Flow (Unit 4 Prosody HMM)</h3>
-                  <p className="muted" style={{ margin: '2px 0 0' }}>Decoded conversation states (`Explanation`, `KeyEmphasis`, `QuestionPrompt`, `TurnPause`) from F0 + RMS cues.</p>
+                  <h3>Discourse &amp; Vocal Emphasis Flow (Prosody HMM)</h3>
+                  <p className="muted" style={{ margin: '2px 0 0' }}>Decoded conversation states (Explanation, KeyEmphasis, QuestionPrompt, TurnPause) from F0 + RMS cues.</p>
                 </div>
               </div>
               <div className="tag-row">
@@ -621,7 +582,7 @@ function ResultsView({
           <div className="panel-header">
             <div>
               <h3>Acoustically Similar Past Recordings (DTW Match)</h3>
-              <p className="muted" style={{ margin: '2px 0 0' }}>Ranked by MFCC Dynamic Time Warping distance against your Audio Archive.</p>
+              <p className="muted" style={{ margin: '2px 0 0' }}>Ranked by MFCC Dynamic Time Warping distance against your audio logs.</p>
             </div>
           </div>
           {similar.map((m: any) => (
@@ -640,7 +601,7 @@ function ResultsView({
         <section className="panel">
           <div className="panel-header" style={{ marginBottom: showDsp ? 14 : 0 }}>
             <div>
-              <h3><Activity size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} />Audio Signal &amp; Formant Diagnostics (This Recording)</h3>
+              <h3><Activity size={15} style={{ verticalAlign: 'middle', marginRight: 6, color: '#06b6d4' }} />Audio Signal &amp; Formant Diagnostics</h3>
               <p className="muted" style={{ margin: '2px 0 0' }}>
                 SNR: {diag.snr_before_db} dB → {diag.snr_after_db} dB · LPC Formants: {diag.lpc_formants_hz?.slice(0, 3).join(', ') || '—'} Hz
               </p>
@@ -663,7 +624,7 @@ function ResultsView({
 
       {dropped.length > 0 && (
         <section className="panel">
-          <div className="panel-header"><h3>Filtered / Sub-Threshold Detections ({dropped.length})</h3></div>
+          <div className="panel-header"><h3>Filtered / Sub-Threshold Ambient Detections ({dropped.length})</h3></div>
           {dropped.slice(0, 12).map((d, i) => (
             <div key={i} className="list-card">
               <div>

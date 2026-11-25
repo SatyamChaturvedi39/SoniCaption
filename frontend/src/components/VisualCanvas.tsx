@@ -1,40 +1,15 @@
 import { useEffect, useRef } from 'react'
 
-function cyberHeatColor(norm: number): string {
+function heatColor(norm: number): string {
   const t = Math.max(0, Math.min(1, norm))
-  // Cyber viridis/electric audio gradient:
-  // t=0: dark navy (#090918)
-  // t=0.35: deep purple (#4c1d95)
-  // t=0.7: electric cyan/emerald (#06b6d4 / #10b981)
-  // t=1.0: bright warm yellow-white (#fef08a)
-  let r: number, g: number, b: number
-  if (t < 0.25) {
-    const sub = t / 0.25
-    r = Math.round(9 + sub * 25)
-    g = Math.round(9 + sub * 15)
-    b = Math.round(24 + sub * 85)
-  } else if (t < 0.6) {
-    const sub = (t - 0.25) / 0.35
-    r = Math.round(34 + sub * 40)
-    g = Math.round(24 + sub * 130)
-    b = Math.round(109 + sub * 90)
-  } else if (t < 0.85) {
-    const sub = (t - 0.6) / 0.25
-    r = Math.round(74 + sub * 130)
-    g = Math.round(154 + sub * 80)
-    b = Math.round(199 - sub * 80)
-  } else {
-    const sub = (t - 0.85) / 0.15
-    r = Math.round(204 + sub * 51)
-    g = Math.round(234 + sub * 21)
-    b = Math.round(119 + sub * 136)
-  }
+  const r = Math.round(18 + t * 225)
+  const g = Math.round(28 + Math.sin(t * Math.PI) * 125 + t * 40)
+  const b = Math.round(52 + (1 - t) * 75)
   return `rgb(${r},${g},${b})`
 }
 
 export function SpectrogramCanvas({ matrix, title }: { matrix: number[][]; title?: string }) {
   const ref = useRef<HTMLCanvasElement | null>(null)
-
   useEffect(() => {
     const canvas = ref.current
     if (!canvas || !matrix.length || !matrix[0]?.length) return
@@ -52,7 +27,7 @@ export function SpectrogramCanvas({ matrix, title }: { matrix: number[][]; title
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const val = (matrix[rows - 1 - r][c] - mn) / span
-        ctx.fillStyle = cyberHeatColor(val)
+        ctx.fillStyle = heatColor(val)
         ctx.fillRect(c * cellW, r * cellH, Math.ceil(cellW), Math.ceil(cellH))
       }
     }
@@ -78,7 +53,6 @@ export function DualLineCanvas({
   labelB?: string
 }) {
   const ref = useRef<HTMLCanvasElement | null>(null)
-
   useEffect(() => {
     const canvas = ref.current
     if (!canvas || !primary.length) return
@@ -86,24 +60,8 @@ export function DualLineCanvas({
     if (!ctx) return
     const { width: w, height: h } = canvas
     ctx.clearRect(0, 0, w, h)
-    ctx.fillStyle = '#08080d'
+    ctx.fillStyle = '#14171c'
     ctx.fillRect(0, 0, w, h)
-
-    // Subtle background grid lines
-    ctx.strokeStyle = '#181826'
-    ctx.lineWidth = 1
-    for (let x = 0; x < w; x += 50) {
-      ctx.beginPath()
-      ctx.moveTo(x, 0)
-      ctx.lineTo(x, h)
-      ctx.stroke()
-    }
-    for (let y = 0; y < h; y += 35) {
-      ctx.beginPath()
-      ctx.moveTo(0, y)
-      ctx.lineTo(w, y)
-      ctx.stroke()
-    }
 
     const all = secondary?.length ? [...primary, ...secondary] : primary
     const absMax = Math.max(0.01, ...all.map((v) => Math.abs(v)))
@@ -112,7 +70,7 @@ export function DualLineCanvas({
       ctx.save()
       ctx.globalAlpha = alpha
       ctx.strokeStyle = color
-      ctx.lineWidth = 1.9
+      ctx.lineWidth = 1.8
       ctx.beginPath()
       arr.forEach((v, i) => {
         const x = (i / Math.max(arr.length - 1, 1)) * w
@@ -123,21 +81,15 @@ export function DualLineCanvas({
       ctx.stroke()
       ctx.restore()
     }
-    drawSeries(primary, '#f43f5e', 0.65)
-    if (secondary?.length) drawSeries(secondary, '#06b6d4', 0.95)
+    drawSeries(primary, '#ea580c', 0.6)
+    if (secondary?.length) drawSeries(secondary, '#2dd4bf', 0.95)
   }, [primary, secondary])
 
   return (
     <div className="canvas-frame">
       <div className="canvas-legend">
-        <span>
-          <i style={{ background: '#f43f5e' }} /> {labelA}
-        </span>
-        {secondary?.length ? (
-          <span>
-            <i style={{ background: '#06b6d4' }} /> {labelB}
-          </span>
-        ) : null}
+        <span><i style={{ background: '#ea580c' }} /> {labelA}</span>
+        {secondary?.length ? <span><i style={{ background: '#2dd4bf' }} /> {labelB}</span> : null}
       </div>
       <canvas ref={ref} width={560} height={145} className="lab-canvas" />
     </div>

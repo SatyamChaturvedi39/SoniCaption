@@ -1,6 +1,6 @@
 """
 Dynamic Time Warping (DTW) Sequence Alignment.
-Fulfills Unit 3 (Pattern Comparison & Time Alignment) requirements:
+Acoustic Pattern Matching & Alignment Engine:
 - Frame-level local distortion metrics (Euclidean, Cosine, Squared Euclidean)
 - Accumulated cost matrix dynamic programming recurrence
 - Boundary, monotonicity, and continuity constraints

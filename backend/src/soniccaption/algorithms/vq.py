@@ -1,6 +1,6 @@
 """
 Vector Quantisation (VQ) Codebook Generation.
-Fulfills Unit 2 (Vector Quantisation & Pattern Recognition) requirements:
+Acoustic Clustering & Codebook Generation:
 - K-Means Lloyd Vector Quantisation
 - Linde-Buzo-Gray (LBG) binary splitting algorithm
 - Codeword index quantization and distortion tracking

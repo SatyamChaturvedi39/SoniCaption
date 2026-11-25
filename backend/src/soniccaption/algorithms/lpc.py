@@ -1,6 +1,6 @@
 """
 Linear Predictive Coding (LPC) and Vocal Tract Formant Modeling.
-Fulfills Unit 2 (LPC Analysis & Acoustic Modeling) requirements:
+Acoustic Vocal Tract & Formant Modeling Engine:
 - Autocorrelation method
 - Levinson-Durbin recursion for AR predictor coefficients
 - PARCOR / reflection coefficients

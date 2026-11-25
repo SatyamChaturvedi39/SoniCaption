@@ -1,4 +1,4 @@
-"""Voice activity detection (Unit 3: speech detection) using the pretrained Silero VAD model.
+"""Voice activity detection using the pretrained Silero VAD model.
 
 VAD answers *where* someone is speaking; ASR answers *what* they said.
 Silero is a small neural network that scores every 32 ms frame (512 samples at 16 kHz) with a
@@ -60,16 +60,16 @@ def _highpass_speech_band(audio: np.ndarray) -> np.ndarray:
     return out
 
 
-def detect_speech(audio: np.ndarray, sample_rate: int, threshold: float = 0.5,
-                  min_speech_ms: int = 250, min_silence_ms: int = 100, pad_ms: int = 30,
-                  min_segment_rms: float = 0.010) -> list[dict]:
+def detect_speech(audio: np.ndarray, sample_rate: int, threshold: float = 0.45,
+                  min_speech_ms: int = 200, min_silence_ms: int = 100, pad_ms: int = 40,
+                  min_segment_rms: float = 0.002) -> list[dict]:
     """Return speech segments in seconds, sorted by start time.
 
     threshold       speech probability needed to count a frame as speech (higher = stricter)
     min_speech_ms   drop speech bursts shorter than this
     min_silence_ms  gaps shorter than this do not split a segment
     pad_ms          padding added to both ends of every segment
-    min_segment_rms drop faint ambient/fan false positives below this 16 kHz RMS floor (-40 dB)
+    min_segment_rms drop faint noise below this 16 kHz RMS floor (0.002 ~ -54 dB)
     """
     if not 0.0 < threshold < 1.0:
         raise ValueError("threshold must be between 0 and 1.")
@@ -78,7 +78,7 @@ def detect_speech(audio: np.ndarray, sample_rate: int, threshold: float = 0.5,
         return []
     x_clean = _highpass_speech_band(x)
     clip_rms = float(np.sqrt(np.mean(x_clean ** 2)))
-    if clip_rms < min_segment_rms * 0.65:
+    if clip_rms < 1e-4:
         return []
 
     import torch

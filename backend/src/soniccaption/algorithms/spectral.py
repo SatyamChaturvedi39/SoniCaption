@@ -1,6 +1,6 @@
 """
 Spectral Analysis, Time-Domain Metrics, and Acoustic Feature Extraction.
-Fulfills Unit 1 (Fundamentals) and Unit 2 (Spectral Analysis & Filter-banks) requirements:
+Signal Processing & Time-Frequency Representations:
 - Short-time Energy and RMS
 - Zero-Crossing Rate (ZCR)
 - Voiced / Unvoiced / Silence classification
@@ -353,7 +353,7 @@ def extract_spectral_features(
     n_mfcc: int = 13
 ) -> SpectralFeatures:
     """
-    High-level extractor aggregating all Unit 1 & 2 representations.
+    High-level acoustic extractor aggregating spectral and prosodic representations.
     """
     signal = audio.samples
     sr = audio.sample_rate

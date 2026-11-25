@@ -1,7 +1,7 @@
 """
 Audio Ingestion, Conditioning, and Synthetic Signal Generation Module.
 Provides robust file decoding, channel normalization, 16 kHz resampling,
-and deterministic benchmark signal generation for Unit 1-4 validation.
+and deterministic benchmark signal generation for audio pipeline validation.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ def generate_synthetic_signal(
     f0: float = 130.0
 ) -> AudioData:
     """
-    Generates synthetic deterministic acoustic benchmarks for Unit 1-4 lab verification.
+    Generates synthetic deterministic acoustic benchmarks for audio pipeline verification.
 
     Signal Types:
       - 'vowel_ah': Synthetic /a/ vowel with vocal tract resonances (F1=730Hz, F2=1090Hz, F3=2440Hz).

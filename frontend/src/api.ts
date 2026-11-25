@@ -15,21 +15,22 @@ export const getHealth = () => reqJson<any>('/api/health')
 
 export async function analyzeAudio(
   file: File,
-  opts: {
-    denoise: boolean
-    sourceType?: string
-    modelSource?: 'resnet' | 'hf-cnn'
-    speakerMode?: 'auto' | 'single' | 'dialogue'
-  } = { denoise: true }
+  opts: { denoise: boolean; sourceType?: string } = { denoise: true }
 ): Promise<Analysis> {
   const form = new FormData()
   form.append('file', file)
   form.append('denoise', String(opts.denoise))
   form.append('source_type', opts.sourceType || 'upload')
-  form.append('model_source', opts.modelSource || 'resnet')
-  form.append('speaker_mode', opts.speakerMode || 'auto')
+  form.append('model_source', 'resnet')
   form.append('save_log', 'true')
   return reqJson<Analysis>('/api/v1/audio/analyze', { method: 'POST', body: form })
+}
+
+export async function authenticateVoice(file: File, denoise = true): Promise<any> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('denoise', String(denoise))
+  return reqJson<any>('/api/v1/voice/authenticate', { method: 'POST', body: form })
 }
 
 export async function queryAudioByVoice(file: File, denoise = true): Promise<{ query_duration: number; matches: DtwSpotMatch[] }> {

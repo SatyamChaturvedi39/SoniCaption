@@ -1,4 +1,4 @@
-"""Discrete Hidden Markov Model (Unit 4).
+"""Discrete Hidden Markov Model Engine.
 
 A discrete HMM is the 5-tuple lambda = (S, V, A, B, pi):
     S   hidden states            s_1 .. s_N
@@ -213,7 +213,7 @@ PRESETS: dict[str, dict] = {
     },
     "prosody_discourse": {
         "name": "prosody_discourse",
-        "description": "Unit 4 spoken prosody & lecture engagement HMM decoding conversational states from pitch/energy observations.",
+        "description": "Spoken prosody & lecture engagement HMM decoding conversational states from pitch/energy observations.",
         "states": ["TurnPause", "Explanation", "KeyEmphasis", "QuestionPrompt"],
         "symbols": ["silent_pause", "steady_voice", "stressed_loud", "rising_pitch"],
         "pi": [0.25, 0.50, 0.15, 0.10],
@@ -243,7 +243,7 @@ def load_preset(name: str) -> tuple[DiscreteHMM, list[str]]:
 
 
 # ============================================================== problem 2: Viterbi
-"""Viterbi decoding for a discrete HMM (Unit 4, basic problem 2).
+"""Viterbi decoding for a discrete HMM.
 
     delta_1(i)     = pi_i * b_i(o_1)                          psi_1(i) = 0
     delta_t(j)     = max_i [ delta_{t-1}(i) * a_ij ] * b_j(o_t)
@@ -375,7 +375,7 @@ def decode_prosody_hmm(
     duration: float,
     step_s: float = 1.0,
 ) -> dict:
-    """Decode Unit 4 conversational prosody states across 1s windows using Unit 1-2 acoustic cues."""
+    """Decode conversational prosody states across 1s windows using acoustic cues."""
     total_steps = max(1, min(30, int(np.ceil(max(duration, step_s) / step_s))))
     obs: list[str] = []
     for k in range(total_steps):

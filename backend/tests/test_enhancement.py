@@ -159,3 +159,23 @@ def test_prosody_analysis_prosody_hmm_and_subsequence_dtw_spotter():
     top = matches[0]
     assert abs(top["start"] - 2.1) <= 0.45
     assert top["similarity_pct"] > 50.0
+
+
+def test_synthetic_voice_detector():
+    from soniccaption.algorithms.authenticator import detect_synthetic_voice
+    sr = 16000
+    # Natural human speech sample
+    vowel = generate_synthetic_signal("vowel_ah", duration=1.2, sr=sr, f0=130.0).samples
+    res = detect_synthetic_voice(vowel, sr=sr)
+    assert "verdict" in res
+    assert "authenticity_score" in res
+    assert "metrics" in res
+    assert 0 <= res["authenticity_score"] <= 100
+    assert "jitter_percent" in res["metrics"]
+    assert "shimmer_db" in res["metrics"]
+
+    # Short silence returns appropriate verdict
+    silence = np.zeros(int(sr * 0.8), dtype=np.float32)
+    sil_res = detect_synthetic_voice(silence, sr=sr)
+    assert sil_res["verdict"] == "Silence Detected"
+    assert sil_res["authenticity_score"] == 0

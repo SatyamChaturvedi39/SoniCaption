@@ -178,7 +178,7 @@ def test_query_dtw_and_copilot_archive_qa(tmp_path, monkeypatch):
     assert r.status_code == 200
     assert "prosody_hmm" in r.json()["metrics"]
 
-    # Extract 0.7s query excerpt from sample_test.wav and locate it via Unit 3 Subsequence DTW
+    # Extract 0.7s query excerpt from sample_test.wav and locate it via Subsequence DTW
     aud = load_audio("sample_test.wav", target_sr=16000, normalize_peak=False).samples
     q_buf = io.BytesIO()
     sf.write(q_buf, aud[: int(16000 * 0.7)], 16000, format="WAV", subtype="PCM_16")
@@ -206,3 +206,16 @@ def test_query_dtw_and_copilot_archive_qa(tmp_path, monkeypatch):
     assert qa.status_code == 200
     assert len(qa.json()["matched_sessions"]) >= 1
     assert "lecture_clip.wav" in qa.json()["reply"] or len(qa.json()["reply"]) > 10
+
+    # AI Voice Authenticator endpoint
+    with open("sample_test.wav", "rb") as f:
+        auth_resp = c.post(
+            "/api/v1/voice/authenticate",
+            files={"file": ("sample_test.wav", f, "audio/wav")},
+            data={"denoise": "true"},
+        )
+    assert auth_resp.status_code == 200
+    auth_data = auth_resp.json()
+    assert "verdict" in auth_data
+    assert "authenticity_score" in auth_data
+    assert "metrics" in auth_data

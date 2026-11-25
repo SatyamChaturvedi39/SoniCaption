@@ -219,3 +219,15 @@ def test_query_dtw_and_copilot_archive_qa(tmp_path, monkeypatch):
     assert "verdict" in auth_data
     assert "authenticity_score" in auth_data
     assert "metrics" in auth_data
+
+    # Diagnostics plot scale check: leading silence must never squash FFT or STFT to -180 dB
+    import numpy as np
+    from app.main import _build_signal_diagnostics
+    from soniccaption.audio.io import generate_synthetic_signal
+    vowel = generate_synthetic_signal("vowel_ah", duration=1.0, sr=16000, f0=125.0).samples
+    padded = np.concatenate([np.zeros(4000, np.float32), vowel, np.zeros(4000, np.float32)])
+    diag = _build_signal_diagnostics(padded, padded, 16000, {"snr_before_db": 20.0, "snr_after_db": 30.0, "snr_gain_db": 10.0})
+    assert max(diag["fft_mag_db"]) == 0.0
+    assert (max(diag["fft_mag_db"]) - min(diag["fft_mag_db"])) > 15.0
+    assert max(diag["lpc_envelope_db"]) == 0.0
+    assert min(min(row) for row in diag["stft_matrix"]) >= -75.0

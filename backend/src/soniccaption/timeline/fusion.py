@@ -114,7 +114,11 @@ def fuse_timeline(speech_segments: list[dict], sound_events: list[dict], vad_seg
         if vad_segments is not None and _covered(start, end, vad_segments) < cfg.min_vad_overlap:
             dropped.append({"item": s, "reason": "VAD found almost no speech here (possible ASR hallucination)"})
             continue
-        speech.append({"start": start, "end": end, "text": text, "words": s.get("words", [])})
+        speech_item = {"start": start, "end": end, "text": text, "words": s.get("words", [])}
+        for extra_k in ("speaker", "delivery_style", "mean_f0_hz", "pitch_slope_hz", "energy_ratio", "speaking_rate_wps"):
+            if extra_k in s:
+                speech_item[extra_k] = s[extra_k]
+        speech.append(speech_item)
 
     # 2. sound-event stream
     kept = []
@@ -155,9 +159,23 @@ def fuse_timeline(speech_segments: list[dict], sound_events: list[dict], vad_seg
     final_events = sorted(resolved, key=lambda e: e["start"])
 
     # 4. merge and sort
-    items = [{"start": round(s["start"], 3), "end": round(s["end"], 3), "category": "speech", "label": "Speech",
-              "display_text": s["text"], "confidence": None, "source": speech_source,
-              "overlaps_speech": False, "words": s["words"]} for s in speech]
+    items = []
+    for s in speech:
+        sp_out = {
+            "start": round(s["start"], 3),
+            "end": round(s["end"], 3),
+            "category": "speech",
+            "label": s.get("speaker", "Speech"),
+            "display_text": s["text"],
+            "confidence": None,
+            "source": speech_source,
+            "overlaps_speech": False,
+            "words": s["words"],
+        }
+        for extra_k in ("speaker", "delivery_style", "mean_f0_hz", "pitch_slope_hz", "energy_ratio", "speaking_rate_wps"):
+            if extra_k in s:
+                sp_out[extra_k] = s[extra_k]
+        items.append(sp_out)
     for e in final_events:
         label, tag = SOUND_TAGS.get(e["label"], (e["label"].replace("_", " ").title(),
                                                  f"[{e['label'].replace('_', ' ').title()}]"))

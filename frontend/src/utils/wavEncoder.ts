@@ -112,8 +112,8 @@ export async function blobToWavFile(blob: Blob, baseName = 'mic-recording'): Pro
       const a = Math.abs(mono[i])
       if (a > maxAbs) maxAbs = a
     }
-    if (maxAbs > 0.001 && maxAbs < 0.45) {
-      const boost = Math.min(5.0, 0.72 / maxAbs)
+    if (maxAbs > 0.001 && maxAbs < 0.25) {
+      const boost = Math.min(2.2, 0.50 / maxAbs)
       for (let i = 0; i < mono.length; i++) {
         mono[i] = mono[i] * boost
       }

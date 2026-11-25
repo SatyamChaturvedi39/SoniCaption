@@ -18,6 +18,7 @@ from soniccaption.algorithms.spectral import (
     classify_voiced_unvoiced,
     compute_mel_spectrogram,
     compute_mfcc,
+    compute_rms,
     compute_short_time_energy,
     compute_zcr,
 )
@@ -212,15 +213,49 @@ def estimate_pitch_contour(
     }
 
 
+def _segment_active_timbre_and_pitch(
+    chunk: np.ndarray,
+    sr: int,
+) -> tuple[np.ndarray, float, bool]:
+    """Extract un-normalized DCT spectral shape (speaker vocal tract timbre) + median voiced pitch from active frames."""
+    frames, _ = frame_signal(chunk, frame_length=400, hop_length=160, window_type="hamming")
+    if len(frames) == 0:
+        return np.zeros(12, dtype=np.float32), 0.0, False
+
+    rms_f = compute_rms(frames)
+    peak_rms = float(np.max(rms_f)) if len(rms_f) else 0.0
+    active_mask = rms_f >= max(0.0025, 0.22 * peak_rms)
+    active_frames = frames[active_mask]
+    if len(active_frames) < 2:
+        active_frames = frames
+
+    # Reconstruct active-only samples for clean spectral/pitch analysis without pause dilution
+    active_sig = active_frames.reshape(-1)
+    _, _, mel = compute_mel_spectrogram(active_sig, sr=sr, n_mels=20, n_fft=512, hop_length=160, frame_length=400)
+    mel_mean = np.mean(mel, axis=1)  # (20,) preserving formant spectral shape
+
+    # DCT-II coefficients c1..c12 (dropping c0 overall loudness so speaker volume doesn't masquerade as a different voice)
+    M = len(mel_mean)
+    timbre = np.zeros(12, dtype=np.float32)
+    m_idx = np.arange(M)
+    for k in range(1, 13):
+        timbre[k - 1] = float(np.dot(np.cos(np.pi * k * (m_idx + 0.5) / float(M)), mel_mean)) * np.sqrt(2.0 / float(M))
+
+    pitch = estimate_pitch_contour(active_sig, sr=sr)
+    voiced_f0 = [f for f in pitch.get("f0_hz", []) if f > 60.0]
+    med_f0 = float(np.median(voiced_f0)) if voiced_f0 else 0.0
+    return timbre, med_f0, med_f0 > 60.0
+
+
 def diarize_speakers(
     samples: np.ndarray,
     speech_segments: List[Dict[str, Any]],
     sr: int = 16000,
-    max_speakers: int = 2,
+    max_speakers: int = 3,
 ) -> List[Dict[str, Any]]:
     """
-    Assign speaker labels ('Speaker 1', 'Speaker 2', ...) to speech segments
-    using Member 1's MFCC + F0 pitch embeddings clustered via K-Means VQ.
+    Assign speaker labels ('Speaker 1', 'Speaker 2', ...) to speech segments using
+    active-frame DCT/MFCC vocal-tract timbre + semitone F0 clustered via K-Means VQ.
     """
     if not speech_segments:
         return []
@@ -228,7 +263,9 @@ def diarize_speakers(
         return [{**seg, "speaker": "Speaker 1"} for seg in speech_segments]
 
     x = np.asarray(samples, dtype=np.float32)
-    embeddings: List[np.ndarray] = []
+    timbres: List[np.ndarray] = []
+    f0s: List[float] = []
+    has_pitch: List[bool] = []
     valid_indices: List[int] = []
 
     for idx, seg in enumerate(speech_segments):
@@ -237,38 +274,73 @@ def diarize_speakers(
         chunk = x[s_idx:e_idx]
         if chunk.size < int(0.15 * sr):
             continue
-        # Use un-CMS-zeroed log-Mel bands (summarized into 8 coarse spectral bands) + log F0 pitch
-        _, _, mel = compute_mel_spectrogram(chunk, sr=sr, n_mels=24, n_fft=512, hop_length=160, frame_length=400)
-        mel_mean = np.mean(mel, axis=1)
-        mel_norm = (mel_mean - np.mean(mel_mean)) / (np.std(mel_mean) + 1e-6)
-        bands = np.mean(mel_norm.reshape(8, 3), axis=1)
-        pitch = estimate_pitch_contour(chunk, sr=sr)
-        f0_feat = np.log1p(pitch["mean_f0_hz"]) * 3.0
-        emb = np.concatenate([bands, [f0_feat]]).astype(np.float32)
-        embeddings.append(emb)
+        timbre, med_f0, pitched = _segment_active_timbre_and_pitch(chunk, sr=sr)
+        timbres.append(timbre)
+        f0s.append(med_f0)
+        has_pitch.append(pitched)
         valid_indices.append(idx)
 
-    if len(embeddings) < 2:
+    if len(timbres) < 2:
         return [{**seg, "speaker": "Speaker 1"} for seg in speech_segments]
 
-    feat_mat = np.vstack(embeddings)
-    vq_res = kmeans_vq(feat_mat, k=min(max_speakers, len(embeddings)), max_iter=30, seed=42)
+    # Impute missing pitch on ultra-short unvoiced bursts with clip median so missing F0 doesn't create phantom outliers
+    valid_f0s = [f for f, ok in zip(f0s, has_pitch) if ok]
+    fallback_f0 = float(np.median(valid_f0s)) if valid_f0s else 140.0
+    semitones = np.array(
+        [12.0 * np.log2(max(f if ok else fallback_f0, 50.0) / 100.0) for f, ok in zip(f0s, has_pitch)],
+        dtype=np.float32,
+    )
 
-    # Guard against over-splitting single-speaker audio
-    if vq_res.codebook.shape[0] >= 2:
-        centroid_dist = float(np.linalg.norm(vq_res.codebook[0] - vq_res.codebook[1]))
-    else:
-        centroid_dist = 0.0
+    timbre_mat = np.vstack(timbres)
+    t_std = np.std(timbre_mat, axis=0, keepdims=True)
+    timbre_z = (timbre_mat - np.mean(timbre_mat, axis=0, keepdims=True)) / np.maximum(t_std, 1e-4)
 
+    # Weight pitch in semitones: a 2.2-semitone shift (~15% F0 change) strongly contributes to clustering
+    pitch_feat = ((semitones - np.mean(semitones)) / 2.2)[:, None] * 1.8
+    feat_mat = np.hstack([timbre_z / np.sqrt(12.0), pitch_feat]).astype(np.float32)
+
+    def _cosine_dist(u: np.ndarray, v: np.ndarray) -> float:
+        nu, nv = float(np.linalg.norm(u)), float(np.linalg.norm(v))
+        if nu < 1e-6 or nv < 1e-6:
+            return 0.0
+        return float(1.0 - np.clip(np.dot(u, v) / (nu * nv), -1.0, 1.0))
+
+    best_labels = np.zeros(len(timbres), dtype=np.int32)
+    max_k = min(max_speakers, len(timbres))
+    for k in range(max_k, 1, -1):
+        vq_res = kmeans_vq(feat_mat, k=k, max_iter=40, seed=42)
+        labels = vq_res.quantized_indices
+        used = [c for c in range(k) if np.sum(labels == c) > 0]
+        if len(used) < 2:
+            continue
+        # Ensure every cluster pair reflects a genuine speaker pitch or timbre difference
+        all_distinct = True
+        for i_a in range(len(used)):
+            for i_b in range(i_a + 1, len(used)):
+                ca, cb = used[i_a], used[i_b]
+                idx_a = np.where(labels == ca)[0]
+                idx_b = np.where(labels == cb)[0]
+                semi_diff = abs(float(np.median(semitones[idx_a])) - float(np.median(semitones[idx_b])))
+                cos_diff = _cosine_dist(np.mean(timbre_mat[idx_a], axis=0), np.mean(timbre_mat[idx_b], axis=0))
+                # Distinct speakers require a strong pitch gap (>= 3.2 st), strong timbre divergence, or both combined
+                is_distinct = (semi_diff >= 3.2) or (cos_diff >= 0.06) or (semi_diff >= 2.0 and cos_diff >= 0.025)
+                if not is_distinct:
+                    all_distinct = False
+                    break
+            if not all_distinct:
+                break
+        if all_distinct:
+            best_labels = labels
+            break
+
+    # Map cluster IDs chronologically so first person heard is always Speaker 1
     assigned = ["Speaker 1"] * len(speech_segments)
-    if centroid_dist >= 1.5:
-        # Chronological label mapping so first speaker encountered is always Speaker 1
-        cluster_map: Dict[int, str] = {}
-        for pos, orig_idx in enumerate(valid_indices):
-            cid = int(vq_res.quantized_indices[pos])
-            if cid not in cluster_map:
-                cluster_map[cid] = f"Speaker {len(cluster_map) + 1}"
-            assigned[orig_idx] = cluster_map[cid]
+    cluster_map: Dict[int, str] = {}
+    for pos, orig_idx in enumerate(valid_indices):
+        cid = int(best_labels[pos])
+        if cid not in cluster_map:
+            cluster_map[cid] = f"Speaker {len(cluster_map) + 1}"
+        assigned[orig_idx] = cluster_map[cid]
 
     return [{**seg, "speaker": assigned[idx]} for idx, seg in enumerate(speech_segments)]
 

@@ -381,7 +381,6 @@ function ResultsView({
   }
 
   const warnings: string[] = data.metrics?.warnings || []
-  const dropped: any[] = data.metrics?.dropped_events || []
   const highlights = data.reminders || []
   const sceneHmm = data.metrics?.scene_hmm
   const prosodyHmm = data.metrics?.prosody_hmm
@@ -613,27 +612,42 @@ function ResultsView({
           </div>
           {showDsp && (
             <div className="grid-2">
-              <DualLineCanvas primary={diag.waveform || []} secondary={diag.waveform_denoised || []} labelA="Raw Audio" labelB="Denoised (Boll OLA)" />
-              <SpectrogramCanvas matrix={diag.stft_matrix || []} title="2D STFT Power Spectrogram (dB)" />
-              <SpectrogramCanvas matrix={diag.mfcc || []} title="13-MFCC Cepstral Matrix" />
-              <DualLineCanvas primary={diag.fft_mag_db || []} secondary={diag.lpc_envelope_db || []} labelA="FFT Spectrum (dB)" labelB="LPC Formant Envelope (dB)" />
+              <DualLineCanvas
+                primary={diag.waveform || []}
+                secondary={diag.waveform_denoised || []}
+                labelA="Raw Mic"
+                labelB="Denoised (Boll OLA)"
+                mode="waveform"
+                durationSec={diag.diag_duration_s || Math.min(data.duration, 6)}
+                subtitle="Time-domain peak amplitude. Narrower cyan trace during pauses shows removed noise."
+              />
+              <SpectrogramCanvas
+                matrix={diag.stft_matrix || []}
+                title="2D STFT Power Spectrogram (0–8 kHz)"
+                mode="stft"
+                durationSec={diag.diag_duration_s || Math.min(data.duration, 6)}
+                maxFreqHz={diag.nyquist_hz || 8000}
+                subtitle="Bright gold bands reveal voiced harmonics and formants; dark areas are silence (-75 dB floor)."
+              />
+              <SpectrogramCanvas
+                matrix={diag.mfcc || []}
+                title="13-MFCC Cepstral Profile"
+                mode="mfcc"
+                durationSec={diag.diag_duration_s || Math.min(data.duration, 6)}
+                subtitle="Vocal tract shape coefficients (c1–c13) over time; color shifts track phoneme transitions."
+              />
+              <DualLineCanvas
+                primary={diag.fft_mag_db || []}
+                secondary={diag.lpc_envelope_db || []}
+                labelA="Peak-Frame FFT Spectrum (dB)"
+                labelB="LPC Vocal-Tract Envelope (dB)"
+                mode="spectrum"
+                maxFreqHz={diag.nyquist_hz || 8000}
+                formantsHz={diag.lpc_formants_hz || []}
+                subtitle="Cyan LPC envelope traces the broad vowel resonances (F1–F3 pins) over fine FFT harmonics."
+              />
             </div>
           )}
-        </section>
-      )}
-
-      {dropped.length > 0 && (
-        <section className="panel">
-          <div className="panel-header"><h3>Filtered / Sub-Threshold Ambient Detections ({dropped.length})</h3></div>
-          {dropped.slice(0, 12).map((d, i) => (
-            <div key={i} className="list-card">
-              <div>
-                <b>{d.item?.label || 'Segment'}</b> {d.item?.confidence != null ? <span className="mono">({(d.item.confidence * 100).toFixed(1)}%)</span> : ''}
-                <div className="muted">{d.reason}</div>
-              </div>
-              <span className="muted mono">{d.item?.start != null ? `${d.item.start.toFixed(2)}s` : ''}</span>
-            </div>
-          ))}
         </section>
       )}
     </div>

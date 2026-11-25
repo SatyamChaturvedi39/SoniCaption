@@ -50,6 +50,29 @@ def test_diarize_speakers_separates_distinct_pitches():
     assert out[1]["speaker"] == "Speaker 2"
     assert out[2]["speaker"] == "Speaker 1"
 
+    # With long pause padding and natural 137 Hz vs 175-210 Hz speaker turn shifts
+    gap_long = np.zeros(int(1.0 * sr), dtype=np.float32)
+    a1 = generate_synthetic_signal("vowel_ah", duration=1.2, sr=sr, f0=137.0).samples
+    a2 = generate_synthetic_signal("vowel_ah", duration=0.8, sr=sr, f0=135.5).samples
+    b1 = generate_synthetic_signal("vowel_ee", duration=1.1, sr=sr, f0=210.5).samples
+    b2 = generate_synthetic_signal("vowel_ee", duration=1.3, sr=sr, f0=188.5).samples
+    b3 = generate_synthetic_signal("vowel_ee", duration=1.1, sr=sr, f0=175.4).samples
+    conv = np.concatenate([a1, gap_long, a2, gap_long, b1, gap_long, b2, gap_long, b3])
+    conv_segs = [
+        {"start": 0.0, "end": 2.2},
+        {"start": 2.2, "end": 4.0},
+        {"start": 4.0, "end": 6.1},
+        {"start": 6.1, "end": 8.4},
+        {"start": 8.4, "end": 9.5},
+    ]
+    conv_out = diarize_speakers(conv, conv_segs, sr=sr, max_speakers=3)
+    assert [x["speaker"] for x in conv_out] == ["Speaker 1", "Speaker 1", "Speaker 2", "Speaker 2", "Speaker 2"]
+
+    # Expressive single speaker stays Speaker 1
+    single = np.concatenate([a1, gap_long, a2, gap_long, generate_synthetic_signal("vowel_ah", duration=1.0, sr=sr, f0=141.0).samples])
+    s_out = diarize_speakers(single, [{"start": 0.0, "end": 2.2}, {"start": 2.2, "end": 4.0}, {"start": 4.0, "end": 5.0}], sr=sr, max_speakers=3)
+    assert [x["speaker"] for x in s_out] == ["Speaker 1", "Speaker 1", "Speaker 1"]
+
 
 def test_empty_signal_guards():
     empty = np.array([], dtype=np.float32)
@@ -124,6 +147,10 @@ def test_stationary_fan_noise_suppressed_while_tonal_siren_kept():
         assert detect_speech(sig, sr) == []
         assert detect_sound_events(sig, sr, threshold=0.5, silence_rms=0.012, ignore_ambient=True) == []
 
+    # Boosted indoor broadband hiss between speech pauses must never classify as rain
+    hiss = (0.035 * rng.normal(0.0, 1.0, int(sr * 3.0))).astype(np.float32)
+    assert detect_sound_events(hiss, sr, threshold=0.0, silence_rms=0.012, ignore_ambient=True, baseline_rms=0.030) == []
+
     # Loud tonal siren sweeping above room fan must still survive ambient rejection
     siren = (fan + 0.25 * np.sin(2.0 * np.pi * np.cumsum(700.0 + 250.0 * np.sin(2.0 * np.pi * 1.5 * t)) / sr)).astype(np.float32)
     events = detect_sound_events(siren, sr, threshold=0.30, silence_rms=0.012, ignore_ambient=True)
@@ -164,15 +191,27 @@ def test_prosody_analysis_prosody_hmm_and_subsequence_dtw_spotter():
 def test_synthetic_voice_detector():
     from soniccaption.algorithms.authenticator import detect_synthetic_voice
     sr = 16000
-    # Natural human speech sample
-    vowel = generate_synthetic_signal("vowel_ah", duration=1.2, sr=sr, f0=130.0).samples
-    res = detect_synthetic_voice(vowel, sr=sr)
-    assert "verdict" in res
-    assert "authenticity_score" in res
-    assert "metrics" in res
-    assert 0 <= res["authenticity_score"] <= 100
-    assert "jitter_percent" in res["metrics"]
-    assert "shimmer_db" in res["metrics"]
+    # Synthetic monotone glottal train -> should detect synthetic/robotic signature
+    rob = generate_synthetic_signal("vowel_ah", duration=1.5, sr=sr, f0=130.0).samples
+    res_rob = detect_synthetic_voice(rob, sr=sr, speech_intervals=[{"start": 0.0, "end": 1.5}])
+    assert res_rob["is_synthetic"] is True
+    assert res_rob["authenticity_score"] <= 44
+    assert "jitter_percent" in res_rob["metrics"]
+    assert "shimmer_db" in res_rob["metrics"]
+
+    # Human-modulated harmonic speech with micro-tremor & dynamic modulation
+    rng = np.random.default_rng(1)
+    t = np.linspace(0.0, 2.0, 2 * sr, endpoint=False)
+    f0_t = 135.0 + 18.0 * np.sin(2.0 * np.pi * 0.7 * t) + 1.8 * rng.normal(0.0, 1.0, t.size)
+    ph = np.cumsum(2.0 * np.pi * f0_t / sr)
+    sig_hum = (
+        0.5 * (1.0 + 0.25 * np.sin(2.0 * np.pi * 2.2 * t) + 0.08 * rng.normal(0.0, 1.0, t.size))
+        * (0.6 * np.sin(ph) + 0.35 * np.sin(2.0 * ph) + 0.2 * np.sin(3.0 * ph) + 0.1 * np.sin(4.0 * ph) + 0.04 * rng.normal(0.0, 1.0, t.size))
+    ).astype(np.float32)
+    res_hum = detect_synthetic_voice(sig_hum, sr=sr, speech_intervals=[{"start": 0.0, "end": 2.0}])
+    assert res_hum["verdict"] == "Authentic Human Voice"
+    assert res_hum["is_synthetic"] is False
+    assert res_hum["authenticity_score"] >= 65
 
     # Short silence returns appropriate verdict
     silence = np.zeros(int(sr * 0.8), dtype=np.float32)

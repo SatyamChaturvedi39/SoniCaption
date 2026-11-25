@@ -231,8 +231,10 @@ def _is_stationary_ambient_prediction(
     eff_clip_floor = max(clip_floor_rms, baseline_rms, 1e-6)
     prom_db = float(20.0 * np.log10((p95_rms + 1e-9) / eff_clip_floor))
     if label == "rain":
-        # Indoor steady fan/HVAC noise looks identical to soft rain below ~-25 dB
-        return (rms < max(0.055, 2.5 * baseline_rms) or score < 0.78) and dyn_db < 5.5
+        # Real rain is uniformly loud and steady (low dyn_db); reject speech-modulated
+        # pause windows (dyn_db >= 5.5) or soft indoor fan/HVAC airflow.
+        is_real_downpour = (rms >= max(0.070, 2.5 * baseline_rms)) and (score >= 0.85) and (dyn_db < 5.5)
+        return not is_real_downpour
     if label == "siren":
         # Genuine sirens are strongly tonal (low spectral flatness), unlike broadband fan noise
         return sfm > 0.22 or p95_rms < max(0.028, 2.0 * baseline_rms)

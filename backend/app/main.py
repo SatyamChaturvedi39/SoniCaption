@@ -82,7 +82,7 @@ try:
     from soniccaption.services import agent_service, session_store
     from soniccaption.services.asr_service import ASRError, transcribe_audio
     from soniccaption.services.sound_cnn import detect_sound_events
-    from soniccaption.timeline.fusion import FusionConfig, fuse_timeline
+    from soniccaption.timeline.fusion import FusionConfig, _covered, fuse_timeline
 
     HAS_LIVE_MODEL = True
     LIVE_IMPORT_ERROR: Optional[str] = None
@@ -178,6 +178,23 @@ def _wav_duration(data: bytes) -> tuple[float, int]:
         return 2.0, 16000
 
 
+def _envelope_1d(arr: np.ndarray, target_len: int = 160) -> List[float]:
+    """Preserve signed amplitude peaks across evenly spaced time bins."""
+    if arr.size == 0:
+        return []
+    if arr.size <= target_len:
+        return [round(float(v), 4) for v in arr]
+    chunks = np.array_split(arr, target_len)
+    out: List[float] = []
+    for c in chunks:
+        if c.size == 0:
+            out.append(0.0)
+        else:
+            idx = int(np.argmax(np.abs(c)))
+            out.append(round(float(c[idx]), 4))
+    return out
+
+
 def _downsample_1d(arr: np.ndarray, target_len: int) -> List[float]:
     if arr.size == 0:
         return []
@@ -204,34 +221,51 @@ def _build_signal_diagnostics(
     pitch: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute inline acoustic & spectral diagnostics on real clip audio."""
-    raw_seg = raw[: sr * 5]
-    den_seg = denoised[: sr * 5]
+    raw_seg = raw[: sr * 6]
+    den_seg = denoised[: sr * 6]
     frames, _ = frame_signal(den_seg, 400, 160)
     rms = compute_rms(frames)
     zcrs = compute_zcr(frames)
-    fft_freqs, fft_mag = compute_fft_spectrum(den_seg[: min(len(den_seg), 8192)], sr=sr, n_fft=512)
+    best_frame_idx = int(np.argmax(rms)) if len(rms) else 0
+    best_frame = frames[best_frame_idx] if len(frames) else den_seg[: min(len(den_seg), 512)]
+
+    fft_freqs, fft_mag = compute_fft_spectrum(best_frame, sr=sr, n_fft=512)
+    fft_mag_vis = np.clip(fft_mag, -70.0, 0.0) if fft_mag.size else fft_mag
+
     _, _, stft_db = compute_stft(den_seg, sr=sr, frame_length=400, hop_length=160, n_fft=512)
+    if stft_db.size:
+        stft_peak = float(np.max(stft_db))
+        stft_vis = np.clip(stft_db - stft_peak, -75.0, 0.0)
+    else:
+        stft_vis = stft_db
+
     mfccs, _, _ = compute_mfcc(den_seg, sr=sr, n_mfcc=13, n_mels=40)
     pitch_out = pitch or estimate_pitch_contour(den_seg, sr=sr)
-    best_frame_idx = int(np.argmax(rms)) if len(rms) else 0
-    lpc = analyze_frame_lpc(frames[best_frame_idx], sr=sr, order=16, n_fft=512) if len(frames) else None
+    lpc = analyze_frame_lpc(best_frame, sr=sr, order=16, n_fft=512) if best_frame.size >= 32 else None
+    if lpc is not None and lpc.spectral_envelope.size:
+        lpc_env = lpc.spectral_envelope - float(np.max(lpc.spectral_envelope))
+        lpc_env_vis = np.clip(lpc_env, -70.0, 0.0)
+    else:
+        lpc_env_vis = np.array([], dtype=np.float32)
 
     return {
         "snr_before_db": den_res["snr_before_db"],
         "snr_after_db": den_res["snr_after_db"],
         "snr_gain_db": den_res["snr_gain_db"],
-        "waveform": _downsample_1d(raw_seg, 90),
-        "waveform_denoised": _downsample_1d(den_seg, 90),
-        "rms": _downsample_1d(rms, 48),
-        "zcr": _downsample_1d(zcrs, 48),
-        "fft_freqs": _downsample_1d(fft_freqs, 64),
-        "fft_mag_db": _downsample_1d(fft_mag, 64),
-        "stft_matrix": _downsample_2d(stft_db, max_rows=32, max_cols=56),
-        "mfcc": _downsample_2d(mfccs, max_rows=13, max_cols=40),
+        "diag_duration_s": round(len(den_seg) / float(sr), 2),
+        "nyquist_hz": round(sr / 2.0, 1),
+        "waveform": _envelope_1d(raw_seg, 160),
+        "waveform_denoised": _envelope_1d(den_seg, 160),
+        "rms": _downsample_1d(rms, 64),
+        "zcr": _downsample_1d(zcrs, 64),
+        "fft_freqs": _downsample_1d(fft_freqs, 128),
+        "fft_mag_db": _downsample_1d(fft_mag_vis, 128),
+        "stft_matrix": _downsample_2d(stft_vis, max_rows=64, max_cols=112),
+        "mfcc": _downsample_2d(mfccs, max_rows=13, max_cols=72),
         "lpc_formants_hz": lpc.formant_frequencies[:4] if lpc else [],
-        "lpc_envelope_db": _downsample_1d(lpc.spectral_envelope, 64) if lpc else [],
+        "lpc_envelope_db": _downsample_1d(lpc_env_vis, 128),
         "f0_mean_hz": pitch_out["mean_f0_hz"],
-        "f0_contour_hz": _downsample_1d(np.array(pitch_out["f0_hz"], dtype=np.float32), 48),
+        "f0_contour_hz": _downsample_1d(np.array(pitch_out["f0_hz"], dtype=np.float32), 64),
     }
 
 
@@ -295,16 +329,27 @@ def _run_multimodal_core(
     asr_time_ms = round((time.perf_counter() - t_asr) * 1000, 1)
 
     pitch_stats = estimate_pitch_contour(active_samples, sr=sample_rate)
-    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=2)
+    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=3)
     prosody_speech = analyze_segment_prosody(active_samples, diarized_speech, sr=sample_rate)
+
+    # When speech is present, the quietest non-speech frames measure the ambient room/fan floor
+    room_baseline = 0.0
+    if vad_segments:
+        raw_frames, _ = frame_signal(active_samples, 400, 160, window_type="hanning")
+        if len(raw_frames):
+            f_rms = compute_rms(raw_frames)
+            non_zero = f_rms[f_rms > 1e-6]
+            quiet_floor = float(np.percentile(non_zero, 20)) if non_zero.size else 0.0
+            room_baseline = max(float(denoise_info.get("noise_floor_rms", 0.0)), quiet_floor)
 
     t_cnn = time.perf_counter()
     raw_events = detect_sound_events(
         active_samples,
         sample_rate,
         threshold=0.0,
-        silence_rms=0.003,
+        silence_rms=0.012,
         ignore_ambient=True,
+        baseline_rms=room_baseline,
         model_source=model_source,
     )
     cnn_time_ms = round((time.perf_counter() - t_cnn) * 1000, 1)
@@ -313,25 +358,23 @@ def _run_multimodal_core(
         prosody_speech,
         raw_events,
         vad_segments=vad_segments,
-        config=FusionConfig(duration=duration),
+        config=FusionConfig(
+            event_threshold=0.62,
+            class_thresholds={"laughing": 0.85, "dog": 0.80, "glass_breaking": 0.82},
+            overlap_policy="suppress",
+            speech_overlap_ratio=0.40,
+            duration=duration,
+        ),
         speech_source=speech_source,
     )
     timeline = fused["timeline"]
 
-    # Map speaker identity & vocal delivery cues back onto chronological speech items
-    spk_idx = 0
+    # Ensure speaker label is propagated safely onto speech items
     for item in timeline:
         if item["category"] == "speech":
-            src = prosody_speech[spk_idx] if spk_idx < len(prosody_speech) else {}
-            speaker = src.get("speaker", "Speaker 1")
+            speaker = item.get("speaker", "Speaker 1")
             item["speaker"] = speaker
             item["label"] = speaker
-            if src:
-                item["delivery_style"] = src.get("delivery_style", "Steady Statement")
-                item["mean_f0_hz"] = src.get("mean_f0_hz", 0.0)
-                item["energy_ratio"] = src.get("energy_ratio", 1.0)
-                item["speaking_rate_wps"] = src.get("speaking_rate_wps", 0.0)
-            spk_idx += 1
 
     speech_segments = [
         {
@@ -365,7 +408,7 @@ def _run_multimodal_core(
     prosody_hmm = decode_prosody_hmm(speech_segments, duration, step_s=1.0)
     mfcc_signature = extract_clip_signature(active_samples, sr=sample_rate)
     diagnostics = _build_signal_diagnostics(raw_samples, denoise_info["denoised"], sample_rate, denoise_info, pitch=pitch_stats)
-    voice_authenticity = detect_synthetic_voice(active_samples, sr=sample_rate)
+    voice_authenticity = detect_synthetic_voice(active_samples, sr=sample_rate, speech_intervals=vad_segments)
 
     LAST_AUDIO_CONTEXT.clear()
     LAST_AUDIO_CONTEXT.update(
@@ -752,17 +795,19 @@ async def watch_ambient_chunk(
         rms_db = round(float(20.0 * np.log10(max(rms, 1e-6))), 1)
         vad_floor = max(0.002, baseline_rms * 1.05) if baseline_rms > 0 else 0.002
         vad_segs = detect_speech(active, 16000, min_segment_rms=vad_floor)
-        events = detect_sound_events(
+        raw_events = detect_sound_events(
             active,
             16000,
             window_s=2.0,
             hop_s=0.5,
-            threshold=0.50,
-            silence_rms=0.003,
+            threshold=0.65,
+            silence_rms=0.014,
             ignore_ambient=True,
             baseline_rms=baseline_rms,
             model_source=model_source,
         )
+        # ESC-50 lacks a speech class: suppress event labels triggered by the user talking
+        events = [ev for ev in raw_events if _covered(ev["start"], ev["end"], vad_segs) < 0.30]
 
         urgent_alert = None
         for ev in events:

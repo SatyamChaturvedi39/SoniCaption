@@ -5,285 +5,359 @@ Forensic acoustic analysis to detect synthetic, text-to-speech (TTS),
 and neural vocoder generated speech (e.g., ElevenLabs, HiFi-GAN, VITS, StyleTTS)
 versus natural human vocal tract acoustics.
 
-Key Biometric Cues:
-1. Micro-Pitch Jitter (Relative Average Perturbation of F0)
-2. Amplitude Shimmer (Cycle-to-Cycle Vocal Energy Perturbation)
-3. LPC Inverse-Filter Prediction Residual Entropy & Kurtosis
-4. High-Frequency Spectral Cutoff & Vocoder Phase Dispersion
-5. Harmonics-to-Noise Naturalness Ratio (HNR)
+Key Biometric Cues (computed strictly on VAD-active human speech segments):
+1. Sub-sample Parabolic Micro-Pitch Jitter (Relative Average Perturbation of F0)
+2. Non-Overlapping Sub-Frame Amplitude Shimmer (Cycle Energy Perturbation)
+3. Active-Frame LPC Inverse-Filter Glottal Residual Kurtosis & Flatness
+4. High-Frequency Spectral Cutoff & Harmonics Roll-off
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy import signal as sp_signal
 
-from soniccaption.algorithms.enhancement import estimate_pitch_contour
 from soniccaption.algorithms.lpc import analyze_frame_lpc
-from soniccaption.algorithms.spectral import compute_short_time_energy
+from soniccaption.audio.preprocessing import frame_signal
+from soniccaption.audio.vad import detect_speech
 
 
-def compute_pitch_jitter(f0_series: List[float]) -> tuple[float, str]:
+def _parabolic_f0(frame: np.ndarray, sr: int, fmin: float = 75.0, fmax: float = 380.0) -> Tuple[float, float]:
+    """Sub-sample F0 (Hz) and peak normalized autocorrelation via parabolic interpolation."""
+    centered = frame - np.mean(frame)
+    energy = float(np.dot(centered, centered))
+    lag_min = max(3, int(sr / fmax))
+    lag_max = min(len(centered) - 3, int(sr / fmin))
+    if energy <= 1e-8 or lag_max <= lag_min + 2:
+        return 0.0, 0.0
+
+    corr = np.correlate(centered, centered, mode="full")[len(centered) - 1 :]
+    best_lag = -1
+    best_norm = 0.0
+    norms = np.zeros(lag_max + 2, dtype=np.float32)
+
+    for lag in range(lag_min - 1, lag_max + 2):
+        if lag < 1 or lag >= len(corr):
+            continue
+        denom = float(np.sqrt(np.sum(centered[:-lag] ** 2) * np.sum(centered[lag:] ** 2))) + 1e-12
+        norms[lag] = float(corr[lag]) / denom
+        if lag_min <= lag <= lag_max and norms[lag] > best_norm:
+            best_norm = float(norms[lag])
+            best_lag = lag
+
+    if best_norm < 0.40 or best_lag <= lag_min:
+        return 0.0, best_norm
+
+    y_l, y_c, y_r = float(norms[best_lag - 1]), float(norms[best_lag]), float(norms[best_lag + 1])
+    denom = 2.0 * (y_l - 2.0 * y_c + y_r)
+    delta = (y_l - y_r) / denom if abs(denom) > 1e-9 else 0.0
+    delta = float(np.clip(delta, -0.5, 0.5))
+    refined_lag = float(best_lag) + delta
+    return float(sr) / max(refined_lag, 1.0), best_norm
+
+
+def _extract_voiced_metrics(speech_segments: List[np.ndarray], sr: int) -> Tuple[float, float, float, float, str, str]:
     """
-    Compute micro-pitch perturbation (Relative Average Perturbation / Local Jitter).
-    Natural human vocal cords exhibit natural involuntary neuromuscular jitter: 0.5% - 2.2%.
-    Neural vocoders typically show unnaturally smooth pitch (< 0.35%) or discrete stepping.
-    """
-    voiced = [f for f in f0_series if f > 60.0]
-    if len(voiced) < 8:
-        return 0.0, "Insufficient Voiced Frames"
-
-    v = np.array(voiced, dtype=np.float32)
-    mean_f0 = float(np.mean(v))
-    if mean_f0 < 1e-4:
-        return 0.0, "Zero Pitch"
-
-    diffs = np.abs(np.diff(v))
-    jitter_ratio = float(np.mean(diffs) / mean_f0) * 100.0  # as percentage
-
-    if 0.45 <= jitter_ratio <= 2.8:
-        status = "Natural Human Micro-Tremor"
-    elif jitter_ratio < 0.45:
-        status = "Oversmoothed (AI Vocoder Signature)"
-    else:
-        status = "High Variance / Irregular"
-
-    return round(jitter_ratio, 2), status
-
-
-def compute_amplitude_shimmer(samples: np.ndarray, sr: int = 16000) -> tuple[float, str]:
-    """
-    Compute short-term cycle-to-cycle amplitude perturbation (Shimmer in dB).
-    Natural human glottal pulses vary frame-to-frame by 0.6 dB to 2.8 dB.
-    Synthetic TTS vocoders produce mathematically uniform cycle amplitudes (< 0.45 dB).
+    Analyze contiguous voiced runs across VAD speech segments.
+    Returns (jitter_pct, shimmer_db, mean_f0_hz, pitch_std_hz, jitter_status, shimmer_status).
     """
     frame_len = int(sr * 0.025)  # 25 ms
-    hop_len = int(sr * 0.010)    # 10 ms
-    if len(samples) < frame_len * 3:
-        return 0.0, "Clip Too Short"
+    hop_len = int(sr * 0.008)    # 8 ms
+    shimmer_hop = int(sr * 0.010)  # 10 ms non-overlapping chunks for unsmoothed amplitude delta
 
-    # Frame energy
-    n_frames = 1 + (len(samples) - frame_len) // hop_len
-    idx = np.arange(frame_len)[None, :] + (np.arange(n_frames) * hop_len)[:, None]
-    frames = samples[idx]
-    rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+    all_f0: List[float] = []
+    jitter_rel_diffs: List[float] = []
+    shimmer_diffs_db: List[float] = []
 
-    # Consider active frames above noise floor
-    peak_rms = np.max(rms) if rms.size else 0.0
-    active = rms[rms >= 0.15 * peak_rms]
-    if len(active) < 6:
-        return 0.0, "Insufficient Energy"
+    for seg in speech_segments:
+        if len(seg) < frame_len * 2:
+            continue
 
-    # Frame-to-frame amplitude ratio in dB
-    ratios = np.abs(20.0 * np.log10((active[1:] + 1e-9) / (active[:-1] + 1e-9)))
-    shimmer_db = float(np.mean(ratios))
+        # 1. Track sub-sample F0 within contiguous voiced runs
+        frames, _ = frame_signal(seg, frame_len, hop_len, window_type="hanning")
+        rms_f = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+        rms_thresh = max(0.003, 0.18 * float(np.max(rms_f)))
 
-    if 0.55 <= shimmer_db <= 3.2:
-        status = "Natural Amplitude Dynamic"
-    elif shimmer_db < 0.55:
-        status = "Unnaturally Uniform (Synthetic Vocoder)"
+        prev_f0 = 0.0
+        for fr, r_val in zip(frames, rms_f):
+            if r_val < rms_thresh:
+                prev_f0 = 0.0
+                continue
+            f0, strength = _parabolic_f0(fr, sr)
+            if f0 > 65.0 and strength >= 0.42:
+                all_f0.append(f0)
+                if prev_f0 > 65.0 and abs(f0 - prev_f0) / prev_f0 < 0.15:  # exclude octave jumps
+                    jitter_rel_diffs.append(abs(f0 - prev_f0) / prev_f0)
+                prev_f0 = f0
+            else:
+                prev_f0 = 0.0
+
+        # 2. Non-overlapping 10 ms sub-frame amplitude shimmer (preserves real glottal variability)
+        n_sub = len(seg) // shimmer_hop
+        if n_sub >= 4:
+            sub = seg[: n_sub * shimmer_hop].reshape(n_sub, shimmer_hop)
+            sub_rms = np.sqrt(np.mean(sub ** 2, axis=1) + 1e-12)
+            sub_thresh = max(0.004, 0.22 * float(np.max(sub_rms)))
+            for i in range(1, n_sub):
+                if sub_rms[i] >= sub_thresh and sub_rms[i - 1] >= sub_thresh:
+                    db_diff = abs(20.0 * np.log10((sub_rms[i] + 1e-9) / (sub_rms[i - 1] + 1e-9)))
+                    shimmer_diffs_db.append(float(db_diff))
+
+    mean_f0 = round(float(np.mean(all_f0)), 1) if all_f0 else 0.0
+    pitch_std = round(float(np.std(all_f0)), 1) if all_f0 else 0.0
+
+    if len(jitter_rel_diffs) < 5:
+        jitter_pct = 0.0
+        jitter_status = "Insufficient Voiced Speech"
     else:
-        status = "High Dynamic Modulation"
+        jitter_pct = round(float(np.median(jitter_rel_diffs)) * 100.0, 2)
+        if jitter_pct >= 0.25 and jitter_pct <= 4.0:
+            jitter_status = "Natural Human Micro-Tremor"
+        elif jitter_pct < 0.25:
+            jitter_status = "Oversmoothed (Synthetic Pitch Track)"
+        else:
+            jitter_status = "High Pitch Perturbation"
 
-    return round(shimmer_db, 2), status
-
-
-def compute_lpc_residual_profile(samples: np.ndarray, sr: int = 16000) -> tuple[float, float, str]:
-    """
-    Compute LPC prediction residual statistics.
-    Natural human speech filtered through inverse vocal tract filter A(z) leaves
-    quasi-periodic glottal pulses with high impulse kurtosis.
-    Neural vocoders leave oversmoothed or diffused residuals.
-    """
-    if len(samples) < sr * 0.2:
-        return 0.0, 0.0, "Too Short"
-
-    # Use first 1.5s active segment
-    x = samples[: min(len(samples), int(sr * 1.5))]
-    lpc_res = analyze_frame_lpc(x, sr=sr, order=14)
-    if lpc_res is None or len(lpc_res.lpc_coefficients) < 15:
-        return 0.0, 0.0, "LPC Failed"
-
-    # Inverse filter: e[n] = x[n] + sum_{k=1}^p a_k x[n-k]
-    a = lpc_res.lpc_coefficients
-    residual = sp_signal.lfilter(a, [1.0], x)
-
-    # Residual spectral flatness
-    res_pow = np.abs(np.fft.rfft(residual[: min(len(residual), 2048)])) ** 2 + 1e-12
-    geo = np.exp(np.mean(np.log(res_pow)))
-    arith = np.mean(res_pow)
-    flatness = float(geo / max(arith, 1e-12))
-
-    # Kurtosis of excitation residual
-    std_res = float(np.std(residual))
-    if std_res > 1e-6:
-        norm_res = (residual - float(np.mean(residual))) / std_res
-        kurtosis = float(np.mean(norm_res ** 4)) - 3.0
+    if len(shimmer_diffs_db) < 6:
+        shimmer_db = 0.0
+        shimmer_status = "Insufficient Voiced Speech"
     else:
-        kurtosis = 0.0
+        shimmer_db = round(float(np.median(shimmer_diffs_db)), 2)
+        if 0.35 <= shimmer_db <= 4.5:
+            shimmer_status = "Natural Amplitude Dynamics"
+        elif shimmer_db < 0.35:
+            shimmer_status = "Unnaturally Uniform (Synthetic Envelope)"
+        else:
+            shimmer_status = "High Dynamic Modulation"
 
-    if kurtosis >= 3.5:
-        status = "Natural Glottal Impulses"
-    elif kurtosis < 1.8:
-        status = "Diffusion / Vocoder Excitation"
+    return jitter_pct, shimmer_db, mean_f0, pitch_std, jitter_status, shimmer_status
+
+
+def _extract_active_lpc_and_spectral(speech_segments: List[np.ndarray], sr: int) -> Tuple[float, float, float, str, str]:
+    """Compute LPC glottal residual kurtosis/flatness and HF spectral cutoff on loudest speech frames."""
+    speech_cat = np.concatenate(speech_segments) if speech_segments else np.array([], dtype=np.float32)
+    if len(speech_cat) < 400:
+        return 0.0, 0.0, 0.0, "Too Short", "Too Short"
+
+    frames, _ = frame_signal(speech_cat, frame_length=400, hop_length=160, window_type="hanning")
+    rms_f = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+    top_idx = np.argsort(rms_f)[-min(12, len(frames)) :]
+
+    kurt_list: List[float] = []
+    flat_list: List[float] = []
+    hf_ratios: List[float] = []
+
+    freqs = np.fft.rfftfreq(512, 1.0 / sr)
+    low_mask = (freqs >= 300.0) & (freqs < 3500.0)
+    high_mask = freqs >= 7000.0
+
+    for idx in top_idx:
+        fr = frames[idx]
+        if rms_f[idx] < 1e-4:
+            continue
+
+        # 16th-order LPC inverse filter residual
+        lpc = analyze_frame_lpc(fr, sr=sr, order=16, n_fft=512)
+        if len(lpc.lpc_coefficients) >= 16:
+            res = sp_signal.lfilter(lpc.lpc_coefficients, [1.0], fr)
+            std_r = float(np.std(res))
+            if std_r > 1e-7:
+                norm_r = (res - float(np.mean(res))) / std_r
+                kurt_list.append(float(np.mean(norm_r ** 4)) - 3.0)
+            res_pow = np.abs(np.fft.rfft(res, n=512)) ** 2 + 1e-12
+            geo = float(np.exp(np.mean(np.log(res_pow))))
+            arith = float(np.mean(res_pow))
+            flat_list.append(geo / max(arith, 1e-12))
+
+        # High-band spectral cutoff ratio
+        spec_pow = np.abs(np.fft.rfft(fr, n=512)) ** 2
+        low_e = float(np.sum(spec_pow[low_mask]))
+        high_e = float(np.sum(spec_pow[high_mask]))
+        if low_e > 1e-9:
+            hf_ratios.append(high_e / low_e)
+
+    kurtosis = round(float(np.median(kurt_list)), 2) if kurt_list else 0.0
+    flatness = round(float(np.median(flat_list)), 3) if flat_list else 0.0
+    hf_ratio = round(float(np.median(hf_ratios)), 4) if hf_ratios else 0.0
+
+    if not kurt_list:
+        lpc_status = "Insufficient Voiced Frames"
+    elif kurtosis >= 1.8:
+        lpc_status = "Natural Glottal Excitation"
+    elif kurtosis < 0.8:
+        lpc_status = "Diffuse / Synthetic Residual"
     else:
-        status = "Moderate Glottal Structure"
+        lpc_status = "Moderate Glottal Structure"
 
-    return round(flatness, 3), round(kurtosis, 2), status
-
-
-def compute_spectral_cutoff(samples: np.ndarray, sr: int = 16000) -> tuple[float, str]:
-    """
-    Check for high-frequency vocoder cutoff or phase smearing above 7.0 kHz.
-    Many fast neural vocoders (22 kHz upsampled or 16 kHz bandlimited) show
-    steep drop-offs or harmonic discontinuities in top bands.
-    """
-    if len(samples) < 512:
-        return 0.0, "Too Short"
-
-    fft_mag = np.abs(np.fft.rfft(samples[: min(len(samples), 4096)])) ** 2
-    freqs = np.fft.rfftfreq(min(len(samples), 4096), 1.0 / sr)
-
-    low_band = np.sum(fft_mag[(freqs >= 300) & (freqs < 3500)])
-    high_band = np.sum(fft_mag[freqs >= 7000])
-
-    ratio = float(high_band / max(low_band, 1e-9))
-
-    if ratio < 0.001:
-        status = "Steep HF Cutoff (Low-Bitrate / Fast Vocoder)"
-    elif ratio > 0.35:
-        status = "Elevated HF Dispersion"
+    if not hf_ratios:
+        hf_status = "Insufficient Spectrum"
+    elif hf_ratio <= 0.0008:
+        hf_status = "Steep HF Cutoff (Bandlimited Vocoder)"
     else:
-        status = "Natural Harmonic Roll-off"
+        hf_status = "Natural Harmonic Roll-off"
 
-    return round(ratio, 4), status
+    return flatness, kurtosis, hf_ratio, lpc_status, hf_status
 
 
 def detect_synthetic_voice(
     samples: np.ndarray,
     sr: int = 16000,
+    speech_intervals: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
-    Perform forensic acoustic authentication to evaluate if an audio recording
-    is produced by a natural human vocal tract or an AI synthesis system.
+    Perform forensic acoustic authentication on spoken human speech segments
+    to evaluate natural human vocal tract dynamics vs synthetic/TTS artifacts.
     """
     x = np.asarray(samples, dtype=np.float32)
-    if x.size < sr * 0.35:
+    if x.size < sr * 0.4:
         return {
             "verdict": "Audio Sample Too Short",
-            "authenticity_score": 50,
+            "authenticity_score": 0,
             "is_synthetic": False,
-            "confidence": 0.5,
+            "confidence": 0.0,
             "risk_level": "unknown",
-            "summary": "Audio recording must be at least 0.5 seconds for acoustic forensic analysis.",
+            "summary": "Record or upload at least 1.0 second of spoken speech for forensic analysis.",
             "metrics": {},
         }
 
-    # Normalize audio
     peak = float(np.max(np.abs(x)))
-    if peak > 1e-4:
-        x = x / peak
-    else:
+    if peak <= 1e-4:
         return {
             "verdict": "Silence Detected",
             "authenticity_score": 0,
             "is_synthetic": False,
             "confidence": 0.0,
             "risk_level": "unknown",
-            "summary": "No speech energy present in audio recording.",
+            "summary": "No acoustic signal energy present.",
             "metrics": {},
         }
 
-    # 1. Pitch contour & Jitter
-    pitch_data = estimate_pitch_contour(x, sr=sr)
-    f0_series = pitch_data.get("f0_hz", [])
-    jitter_val, jitter_status = compute_pitch_jitter(f0_series)
+    x_norm = x / peak
+    vad_segs = speech_intervals if speech_intervals is not None else detect_speech(x_norm, sr, min_segment_rms=0.002)
 
-    # 2. Shimmer
-    shimmer_val, shimmer_status = compute_amplitude_shimmer(x, sr=sr)
+    speech_chunks: List[np.ndarray] = []
+    for seg in vad_segs:
+        i0 = max(0, int(float(seg["start"]) * sr))
+        i1 = min(len(x_norm), int(float(seg["end"]) * sr))
+        if i1 - i0 >= int(0.18 * sr):
+            speech_chunks.append(x_norm[i0:i1])
 
-    # 3. LPC Residual
-    flatness_val, kurtosis_val, lpc_status = compute_lpc_residual_profile(x, sr=sr)
+    total_speech_s = sum(len(c) for c in speech_chunks) / float(sr)
+    if total_speech_s < 0.30:
+        return {
+            "verdict": "No Human Speech Detected",
+            "authenticity_score": 0,
+            "is_synthetic": False,
+            "confidence": 0.0,
+            "risk_level": "unknown",
+            "summary": "No spoken speech detected above ambient noise floor. Speak clearly into the microphone or upload voice audio.",
+            "metrics": {},
+        }
 
-    # 4. HF Cutoff
-    hf_ratio, hf_status = compute_spectral_cutoff(x, sr=sr)
+    jitter_pct, shimmer_db, mean_f0, pitch_std, jitter_status, shimmer_status = _extract_voiced_metrics(speech_chunks, sr)
+    flatness, kurtosis, hf_ratio, lpc_status, hf_status = _extract_active_lpc_and_spectral(speech_chunks, sr)
 
-    # Composite Human Authenticity Score Calculation (0 to 100)
-    score = 50.0
+    if jitter_pct == 0.0 and shimmer_db == 0.0:
+        return {
+            "verdict": "Insufficient Voiced Phonemes",
+            "authenticity_score": 50,
+            "is_synthetic": False,
+            "confidence": 0.2,
+            "risk_level": "unknown",
+            "summary": "Captured speech was too brief or unvoiced to reliably measure glottal cycle perturbations.",
+            "metrics": {
+                "jitter_percent": jitter_pct,
+                "jitter_status": jitter_status,
+                "shimmer_db": shimmer_db,
+                "shimmer_status": shimmer_status,
+                "lpc_residual_kurtosis": kurtosis,
+                "lpc_residual_flatness": flatness,
+                "lpc_status": lpc_status,
+                "hf_ratio": hf_ratio,
+                "hf_status": hf_status,
+                "mean_f0_hz": mean_f0,
+            },
+        }
 
-    # Jitter scoring
-    if 0.50 <= jitter_val <= 2.2:
-        score += 18.0  # highly indicative of human vocal fold dynamics
-    elif jitter_val < 0.40 and len(f0_series) >= 10:
-        score -= 22.0  # characteristic of neural vocoder interpolation
-    elif jitter_val > 3.0:
-        score -= 8.0
+    # Conservative forensic calibration: preserve human authenticity unless clear synthetic patterns co-occur
+    score = 72.0
 
-    # Shimmer scoring
-    if 0.70 <= shimmer_val <= 2.8:
-        score += 16.0  # natural cycle amplitude variability
-    elif shimmer_val < 0.50 and shimmer_val > 0.0:
-        score -= 18.0  # unnaturally uniform amplitude
-    elif shimmer_val > 3.5:
+    # Pitch micro-jitter
+    if 0.22 <= jitter_pct <= 4.0:
+        score += 12.0
+    elif jitter_pct < 0.12:
+        score -= 28.0
+    elif jitter_pct < 0.22:
+        score -= 18.0
+    elif jitter_pct > 5.0:
         score -= 6.0
 
-    # LPC residual scoring
-    if kurtosis_val >= 3.0:
-        score += 14.0  # natural glottal impulse spikes
-    elif kurtosis_val < 1.6 and kurtosis_val != 0.0:
-        score -= 14.0  # diffuse vocoder excitation
+    # Amplitude shimmer
+    if 0.35 <= shimmer_db <= 4.5:
+        score += 10.0
+    elif shimmer_db < 0.30:
+        score -= 22.0
 
-    # Spectral roll-off scoring
-    if "Natural" in hf_status:
-        score += 8.0
-    elif "Steep HF Cutoff" in hf_status:
+    # LPC excitation kurtosis
+    if kurtosis >= 1.8:
+        score += 6.0
+    elif kurtosis < 0.7:
+        score -= 14.0
+
+    # High-band vocoder rolloff
+    if hf_ratio <= 0.0008:
         score -= 12.0
+    else:
+        score += 4.0
 
-    # Clamp score
-    auth_score = int(np.clip(score, 5.0, 98.0))
+    # Prosodic phrase inflection check
+    if pitch_std < 3.0 and mean_f0 > 0:
+        score -= 14.0  # monotone robotic pitch
 
-    if auth_score >= 68:
+    auth_score = int(np.clip(round(score), 5, 98))
+
+    if auth_score >= 65:
         verdict = "Authentic Human Voice"
         is_synthetic = False
         risk_level = "low"
         summary = (
-            f"Vocal biomarkers show natural human dynamics: micro-pitch jitter ({jitter_val}%), "
-            f"natural amplitude shimmer ({shimmer_val} dB), and characteristic glottal impulse residuals."
+            f"Vocal biomarkers align with a natural human vocal tract: natural micro-pitch tremor "
+            f"(jitter {jitter_pct}%), organic energy shimmer ({shimmer_db} dB), and impulsive LPC glottal structure."
         )
-    elif auth_score <= 42:
+    elif auth_score <= 44:
         verdict = "Likely AI-Generated / Synthetic"
         is_synthetic = True
         risk_level = "high"
         summary = (
-            f"Detected synthetic vocoder artifacts: oversmoothed pitch trajectory (jitter: {jitter_val}%), "
-            f"unnaturally uniform frame energy ({shimmer_val} dB), or diffuse LPC excitation residual."
+            f"Detected synthetic speech characteristics: oversmoothed pitch contour (jitter {jitter_pct}%), "
+            f"uniform cycle energy ({shimmer_db} dB), or bandlimited neural vocoder spectrum."
         )
     else:
-        verdict = "Inconclusive / Mixed Biomarkers"
+        verdict = "Borderline / Mixed Biomarkers"
         is_synthetic = False
         risk_level = "medium"
         summary = (
-            f"Acoustic biomarkers are borderline (authenticity {auth_score}%). "
-            f"Pitch jitter is {jitter_val}% and shimmer is {shimmer_val} dB."
+            f"Acoustic biomarkers are inconclusive ({auth_score}% human similarity; jitter {jitter_pct}%, shimmer {shimmer_db} dB). "
+            f"Heavy audio compression or noise filtering can mask natural glottal micro-tremor."
         )
 
     return {
         "verdict": verdict,
         "authenticity_score": auth_score,
         "is_synthetic": is_synthetic,
-        "confidence": round(abs(auth_score - 50) / 50.0, 2),
+        "confidence": round(max(0.15, abs(auth_score - 50) / 50.0), 2),
         "risk_level": risk_level,
         "summary": summary,
         "metrics": {
-            "jitter_percent": jitter_val,
+            "jitter_percent": jitter_pct,
             "jitter_status": jitter_status,
-            "shimmer_db": shimmer_val,
+            "shimmer_db": shimmer_db,
             "shimmer_status": shimmer_status,
-            "lpc_residual_kurtosis": kurtosis_val,
-            "lpc_residual_flatness": flatness_val,
+            "lpc_residual_kurtosis": kurtosis,
+            "lpc_residual_flatness": flatness,
             "lpc_status": lpc_status,
             "hf_ratio": hf_ratio,
             "hf_status": hf_status,
-            "mean_f0_hz": pitch_data.get("mean_f0_hz", 0.0),
+            "mean_f0_hz": mean_f0,
         },
     }

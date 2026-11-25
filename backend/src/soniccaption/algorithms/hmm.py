@@ -205,21 +205,6 @@ def load_preset(name: str) -> tuple[DiscreteHMM, list[str]]:
 
 
 # ============================================================== problem 2: Viterbi
-"""Viterbi decoding for a discrete HMM (Unit 4, basic problem 2).
-
-    delta_1(i)     = pi_i * b_i(o_1)                          psi_1(i) = 0
-    delta_t(j)     = max_i [ delta_{t-1}(i) * a_ij ] * b_j(o_t)
-    psi_t(j)       = argmax_i [ delta_{t-1}(i) * a_ij ]        (backpointer)
-    P*             = max_i delta_T(i)
-    q*_T           = argmax_i delta_T(i)
-    q*_t           = psi_{t+1}(q*_{t+1})                       (backtracking)
-
-Forward sums over all paths (evaluation); Viterbi keeps only the best path (decoding).
-Computed in log space; ties are broken towards the lower state index.
-"""
-
-
-
 def viterbi(model: DiscreteHMM, observations: Sequence[str | int]) -> dict:
     """Decode the most likely hidden state sequence.
 

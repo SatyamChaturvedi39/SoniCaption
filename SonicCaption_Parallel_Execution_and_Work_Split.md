@@ -88,7 +88,7 @@ Focus: Audio Ingestion, Spectral Transformations, Psychoacoustic Features & Envi
     - Mathematical bridge verifying that custom DSP features match GPU-accelerated TorchAudio tensors.
     - SpecAugment (double time/frequency masking) + random gain regularisation.
     - Pretrained ResNet-18 fine-tuning adapted for 1-channel log-Mel spectrograms.
-    - Achieves 93.06% peak validation accuracy and 0.837 macro F1 in 25 epochs.
+    - Achieves 88.75% Fold-4 validation accuracy, 80.00% strictly held-out Fold-5 test accuracy, and 0.787 macro F1 in 30 epochs across all 10 balanced ESC-50 classes.
     - Full export of model weights (soniccaption_esc50_resnet.pt), config.json, labels.json, and figures.
 - Backend Service Adapter Modules:
   * backend/src/soniccaption/audio/io.py (validation, decoding, mono conversion, 16kHz resampling)
@@ -180,7 +180,7 @@ A dense, rigorous IEEE/ACM-style 5-page conference report structured around prod
 | - 7. Environmental Audio Classification: ESC-50 dataset characteristics and balanced curation.     |
 | - 8. Mathematical Feature Bridge: Proving custom DSP equivalence to GPU TorchAudio transforms.      |
 | - 9. Neural Network Architecture: Pretrained ResNet-18 adapted for 1-channel log-Mel spectrograms. |
-| - 10. Training Methodology: SpecAugment regularisation, Cosine Annealing, 93.06% accuracy, 0.837 F1|
+| - 10. Training Methodology: SpecAugment regularisation, Cosine Annealing, 88.75% Val / 80.00% Test, 0.787 F1|
 | - Figure 4: PyTorch ResNet training & validation loss/accuracy curves over 25 epochs.              |
 | - Figure 5: Normalized 10-class confusion matrix on the held-out test fold.                       |
 +----------------------------------------------------------------------------------------------------+

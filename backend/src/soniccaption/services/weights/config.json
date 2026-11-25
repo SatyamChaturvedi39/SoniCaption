@@ -16,13 +16,14 @@
     "door_wood_knock",
     "footsteps",
     "glass_breaking",
-    "laughter",
+    "laughing",
     "rain",
     "siren",
     "sneezing"
   ],
-  "best_val_accuracy": 93.06,
-  "macro_f1_score": 0.837,
+  "best_val_accuracy": 88.75,
+  "test_accuracy": 80.0,
+  "macro_f1_score": 0.787,
   "total_params": 11237194,
-  "training_epochs": 25
+  "training_epochs": 30
 }

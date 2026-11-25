@@ -217,8 +217,9 @@ async def analyze_audio(file: UploadFile = File(...)):
                 "model_architecture": "SonicAcousticResNet-18",
                 "dataset": "ESC-50 (Environmental Sound Classification)",
                 "classes_monitored": 10,
-                "best_val_accuracy": 93.06,
-                "macro_f1": 0.837,
+                "best_val_accuracy": 88.75,
+                "test_accuracy": 80.0,
+                "macro_f1": 0.787,
                 "cnn_inference_time_ms": cnn_time_ms,
                 "vad_speech_ratio": round(speech_ratio, 2),
                 "note": "Live inference using Member 1's trained ResNet-18 weights and DSP algorithms"

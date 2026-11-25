@@ -48,9 +48,155 @@ _BOOKMARK_RE = re.compile(
     re.IGNORECASE,
 )
 _TIME_RE = re.compile(
-    r"\b(today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
+    r"\b((?:today|tonight|tomorrow|next\s+(?:week|month|sprint|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"this\s+(?:week|morning|afternoon|evening|sprint|friday|monday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"end\s+of\s+(?:the\s+)?(?:day|week|sprint)|eod|eow|by\s+noon|noon|midnight|asap|"
+    r"within\s+(?:\d+\s+(?:minutes?|hours?|days?)|an?\s+hour))"
+    r"(?:\s+(?:by|at|around|before)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)?|"
+    r"(?:by|at|before|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?|"
+    r"\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))\b",
     re.IGNORECASE,
 )
+
+_SELF_COMMIT_RE = re.compile(
+    r"(?:^|[.?!;,\s]+)(?:I\s+will|I'll|I\s+am\s+going\s+to|I'm\s+going\s+to|I\s+can|I\s+have\s+to|I\s+need\s+to|"
+    r"I\s+have\s+got\s+to|I\s+gotta|let\s+me|let's|we\s+will|we'll|we\s+are\s+going\s+to|we're\s+going\s+to|"
+    r"we\s+need\s+to|we\s+have\s+to|make\s+sure\s+to|remember\s+to)\s+([^.?!;\n]+)",
+    re.IGNORECASE,
+)
+_DELEGATED_COMMIT_RE = re.compile(
+    r"\b(Speaker\s*\d+|[A-Z][a-z]{2,15})\s+(?:will|is\s+going\s+to|can|needs\s+to|has\s+to|should|shall|must)\s+([^.?!;\n]+)",
+)
+
+
+def _format_deadline(raw_phrase: str) -> tuple[str, str]:
+    """Extract clean deadline expression and strip trailing deadline words from deliverable phrase."""
+    m = _TIME_RE.search(raw_phrase)
+    if not m:
+        return raw_phrase.strip(" ,."), "Unscheduled"
+    dl = re.sub(r"^(?:by|at|before|around)\s+", "", m.group(0).strip(), flags=re.IGNORECASE).strip()
+    dl_fmt = dl[:1].upper() + dl[1:]
+    cleaned = (raw_phrase[: m.start()] + raw_phrase[m.end() :]).strip(" ,.")
+    cleaned = re.sub(r"\s+(?:by|on|at|before)$", "", cleaned, flags=re.IGNORECASE).strip(" ,.")
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return (cleaned or raw_phrase.strip(" ,.")), dl_fmt
+
+
+def extract_corporate_action_items(speech_segments: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Parse spoken commitments into structured tasks mapped to responsible speaker, deliverable, and deadline."""
+    items: List[Dict[str, Any]] = []
+    seen = set()
+
+    for seg in speech_segments or []:
+        txt = str(seg.get("text", "")).strip()
+        if not txt or txt.startswith("[Speech detected"):
+            continue
+        speaker = str(seg.get("speaker") or "Speaker 1")
+        ts = round(float(seg.get("start", 0.0)), 2)
+
+        for pat, explicit_owner in ((_SELF_COMMIT_RE, False), (_DELEGATED_COMMIT_RE, True)):
+            for m in pat.finditer(txt):
+                if explicit_owner:
+                    candidate_owner = m.group(1).strip()
+                    if candidate_owner.lower() in {"that", "this", "there", "here", "what", "which", "when", "they", "it", "everyone", "someone"}:
+                        continue
+                    owner = candidate_owner.title() if candidate_owner.lower().startswith("speaker") else f"{candidate_owner} ({speaker})"
+                    raw_body = m.group(2).strip(" ,.")
+                else:
+                    owner = speaker
+                    raw_body = m.group(1).strip(" ,.")
+
+                if len(raw_body) < 4:
+                    continue
+                task_clean, deadline = _format_deadline(raw_body)
+                if len(task_clean) < 3:
+                    continue
+                task_title = (task_clean[:1].upper() + task_clean[1:])[:120]
+                dedup_key = f"{owner.lower()}::{task_title.lower()}"
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                is_urgent = any(w in raw_body.lower() for w in ("urgent", "asap", "today", "eod", "blocker", "immediately"))
+                items.append({
+                    "owner": owner,
+                    "task": task_title,
+                    "deadline": deadline,
+                    "priority": "high" if is_urgent or str(seg.get("emphasis_tag", "")) == "Urgent" else "medium",
+                    "timestamp_s": ts,
+                    "source_quote": txt[:160],
+                    "status": "open",
+                })
+    return items
+
+
+def _has_any_term(text: str, terms: tuple[str, ...]) -> bool:
+    """Match whole words/phrases using regex word boundaries to avoid substring traps (e.g., incidentally/up and down)."""
+    pattern = r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b"
+    return bool(re.search(pattern, text))
+
+
+def _derive_rule_based_scenario(
+    speech_segments: List[Dict[str, Any]],
+    sound_events: List[Dict[str, Any]],
+    action_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Deterministically infer corporate meeting type, room atmosphere, and active cues."""
+    transcript = " ".join(str(s.get("text", "")) for s in speech_segments).lower()
+    speakers = sorted({str(s.get("speaker") or "Speaker 1") for s in speech_segments if s.get("text")})
+    q_segs = [s for s in speech_segments if s.get("is_question") or str(s.get("text", "")).strip().endswith("?")]
+    urgent_segs = [s for s in speech_segments if s.get("emphasis_tag") in ("Urgent", "Emphatic")]
+
+    if _has_any_term(transcript, ("github", "commit", "pull request", "merge request", "deploy", "deployment", "api", "bug", "branch", "sprint", "codebase", "server", "database", "testing", "frontend", "backend", "repository", "ticket")):
+        scenario_label = "Engineering Sprint Sync & Technical Review"
+    elif _has_any_term(transcript, ("outage", "incident", "escalation", "server down", "service down", "production down", "site down", "blocker", "hotfix", "critical bug")):
+        scenario_label = "Incident Escalation & Blocker Triage"
+    elif _has_any_term(transcript, ("client", "contract", "budget", "pricing", "revenue", "invoice", "deal", "proposal", "sales", "quarter", "stakeholder", "roadmap")):
+        scenario_label = "Client / Executive Strategy Sync"
+    elif len(q_segs) >= 2 and len(speech_segments) >= 3:
+        scenario_label = "Structured Q&A / Design Review"
+    elif len(speakers) >= 2 and action_items:
+        scenario_label = "Team Operational Planning & Task Handoff"
+    elif len(speakers) >= 2:
+        scenario_label = "Multi-Speaker Team Discussion"
+    elif speech_segments:
+        scenario_label = "Executive Briefing / Narrative Update"
+    else:
+        scenario_label = "Awaiting Meeting Audio"
+
+    ev_labels = [str(e.get("label", "")).lower() for e in sound_events]
+    active_cues: List[str] = []
+    mood_parts: List[str] = []
+
+    if q_segs:
+        active_cues.append(f"{len(q_segs)} question inflection{'s' if len(q_segs) > 1 else ''} flagged")
+    if urgent_segs:
+        active_cues.append(f"{len(urgent_segs)} emphatic/urgent remark{'s' if len(urgent_segs) > 1 else ''}")
+        mood_parts.append("High Energy / Urgent")
+    if action_items:
+        active_cues.append(f"{len(action_items)} deliverable{'s' if len(action_items) > 1 else ''} assigned")
+    if any("clapping" in l or "applause" in l for l in ev_labels):
+        active_cues.append("Applause / Group agreement")
+        mood_parts.append("Consensus")
+    if any("laugh" in l for l in ev_labels):
+        active_cues.append("Room laughter heard")
+        mood_parts.append("Lighthearted")
+    if any("knock" in l for l in ev_labels):
+        active_cues.append("Door knock / desk tap cue")
+    if any("glass" in l or "bang" in l for l in ev_labels):
+        active_cues.append("Sharp desk impact / bang")
+    if any("siren" in l for l in ev_labels):
+        active_cues.append("Building alarm / siren alert")
+        mood_parts.append("Safety Alert")
+
+    mood = " · ".join(dict.fromkeys(mood_parts)) if mood_parts else "Focused & Professional"
+    return {
+        "scenario_label": scenario_label,
+        "meeting_mood": mood,
+        "question_count": len(q_segs),
+        "action_count": len(action_items),
+        "speaker_count": len(speakers),
+        "active_cues": active_cues,
+    }
 
 
 def search_archive_sessions(query: str, sessions: Optional[List[Dict[str, Any]]], top_k: int = 3) -> List[Dict[str, Any]]:
@@ -117,10 +263,10 @@ def _call_groq_json(system_prompt: str, user_prompt: str, timeout: float = 20.0)
                 if isinstance(parsed, dict):
                     parsed["_model_used"] = model_id
                     return parsed
-            elif resp.status_code in (400, 404):
-                continue
-            else:
+            elif resp.status_code == 401:
                 return None
+            else:
+                continue
         except Exception:
             continue
     return None
@@ -231,7 +377,7 @@ def extract_session_insights(
     sound_events: List[Dict[str, Any]],
     pitch_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Produce multimodal session synthesis, vocal-emphasis takeaways, and structured notes."""
+    """Produce corporate meeting synthesis, structured action items, and dynamic meeting scenario."""
     transcript = " ".join(
         str(s.get("text", "")).strip()
         for s in speech_segments
@@ -240,28 +386,39 @@ def extract_session_insights(
     speakers = {s.get("speaker", "Speaker 1") for s in speech_segments if s.get("speaker")}
     speaker_count = max(1, len(speakers)) if speech_segments else 0
 
+    rule_actions = extract_corporate_action_items(speech_segments)
+    rule_scenario = _derive_rule_based_scenario(speech_segments, sound_events, rule_actions)
+
+    compact_pitch = {
+        k: round(float(v), 2) if isinstance(v, (int, float)) else v
+        for k, v in (pitch_stats or {}).items()
+        if not isinstance(v, (list, tuple)) and k not in ("times", "f0_hz")
+    }
     prompt_payload = {
         "transcript": transcript,
         "speaker_turns": [
             {
                 "speaker": s.get("speaker", "Speaker 1"),
-                "start": s.get("start"),
-                "delivery_style": s.get("delivery_style", "Steady Statement"),
+                "start": round(float(s.get("start", 0.0)), 2),
+                "emphasis_tag": s.get("emphasis_tag", "Neutral"),
+                "is_question": bool(s.get("is_question", False)),
                 "text": s.get("text"),
             }
-            for s in speech_segments
+            for s in speech_segments[:40]
         ],
-        "sound_events": sound_events,
-        "pitch_stats": pitch_stats or {},
+        "sound_events": sound_events[:25],
+        "pitch_stats": compact_pitch,
     }
     llm = None
     if transcript or sound_events:
         llm = _call_groq_json(
-            "You are SonicCaption's Speech & Acoustic Copilot. "
-            "Return JSON with keys: 'summary' (concise 1-2 sentence synthesis covering speech, vocal emphasis, and sound events), "
-            "'highlights' (array of 1-4 concise study notes or key takeaways with 'title', 'tag' like timestamp/topic, 'priority' in {'low','medium','high'}, "
-            "'trigger_source' in {'voice_bookmark','prosody_highlight','speech_action','acoustic_alert'}). Focus on key spoken concepts, questions, and acoustic events.",
-            json.dumps(prompt_payload),
+            "You are SonicCaption Corporate Meeting Copilot assisting deaf workplace professionals. "
+            "Given speaker turns (with emphasis tags & question flags) and room sound events (laughter, door knocks, clapping, desk bangs), return JSON with:\n"
+            "1. 'summary': concise 1-2 sentence executive summary covering key spoken points, questions, and room cues.\n"
+            "2. 'meeting_scenario': object with 'scenario_label' (short corporate meeting type e.g. 'Engineering Sprint Standup', 'Client Negotiation', 'Incident Triage', 'Executive Briefing', 'Team Brainstorming') and 'meeting_mood' (e.g. 'Collaborative & Urgent').\n"
+            "3. 'action_items': array of spoken commitments mapping 'owner' (responsible speaker e.g. 'Speaker 3'), 'task' (concise deliverable e.g. 'Update GitHub'), 'deadline' (e.g. 'Tomorrow', '4:00 PM', 'Unscheduled'), 'priority' in {'low','medium','high'}, 'timestamp_s' (number).\n"
+            "4. 'highlights': array of 1-3 key highlights with 'title', 'tag', 'priority', 'trigger_source' in {'prosody_highlight','speech_action','acoustic_alert'}.",
+            json.dumps(prompt_payload, default=lambda x: float(x) if hasattr(x, "__float__") else str(x)),
         )
 
     if llm and isinstance(llm, dict) and isinstance(llm.get("summary"), str):
@@ -277,8 +434,31 @@ def extract_session_insights(
                         "trigger_source": str(r.get("trigger_source") or "prosody_highlight"),
                     }
                 )
+        llm_actions = []
+        for a in (llm.get("action_items") or []):
+            if isinstance(a, dict) and a.get("task"):
+                llm_actions.append({
+                    "owner": str(a.get("owner") or "Speaker 1"),
+                    "task": str(a["task"])[:120],
+                    "deadline": str(a.get("deadline") or "Unscheduled"),
+                    "priority": str(a.get("priority") or "medium"),
+                    "timestamp_s": float(a.get("timestamp_s") or 0.0),
+                    "source_quote": "",
+                    "status": "open",
+                })
+        actions = llm_actions if llm_actions else rule_actions
+
+        raw_scen = llm.get("meeting_scenario") if isinstance(llm.get("meeting_scenario"), dict) else {}
+        scenario = {
+            **rule_scenario,
+            "scenario_label": str(raw_scen.get("scenario_label") or rule_scenario["scenario_label"]),
+            "meeting_mood": str(raw_scen.get("meeting_mood") or rule_scenario["meeting_mood"]),
+            "action_count": len(actions),
+        }
         return {
             "summary": llm["summary"].strip(),
+            "action_items": actions,
+            "meeting_scenario": scenario,
             "reminders": notes,
             "highlights": notes,
             "provider": f"groq-{llm.get('_model_used', 'llm')}",
@@ -287,6 +467,8 @@ def extract_session_insights(
     notes = _heuristic_notes_and_actions(transcript, sound_events, speech_segments=speech_segments)
     return {
         "summary": _fallback_summary(transcript, sound_events, speaker_count, pitch_stats),
+        "action_items": rule_actions,
+        "meeting_scenario": rule_scenario,
         "reminders": notes,
         "highlights": notes,
         "provider": "rule-based-local",

@@ -6,13 +6,36 @@ export type TimelineItem = {
   label: string
   speaker?: string
   display_text: string
+  workplace_cue?: string
   confidence: number | null
   source?: string
   overlaps_speech?: boolean
   delivery_style?: string
+  emphasis_tag?: string
+  is_question?: boolean
+  question_reason?: string
   mean_f0_hz?: number
   energy_ratio?: number
   speaking_rate_wps?: number
+}
+
+export type ActionItem = {
+  owner: string
+  task: string
+  deadline: string
+  priority: 'high' | 'medium' | 'low' | string
+  timestamp_s: number
+  source_quote?: string
+  status?: string
+}
+
+export type MeetingScenario = {
+  scenario_label: string
+  meeting_mood: string
+  question_count: number
+  action_count: number
+  speaker_count: number
+  active_cues: string[]
 }
 
 export type DtwSpotMatch = {
@@ -58,6 +81,8 @@ export type Analysis = {
   sample_rate: number
   mode: string
   summary?: string
+  action_items?: ActionItem[]
+  meeting_scenario?: MeetingScenario
   reminders?: ReminderItem[]
   similar_sessions?: SimilarSession[]
   speech_segments: any[]

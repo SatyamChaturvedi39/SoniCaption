@@ -73,6 +73,40 @@ def test_diarize_speakers_separates_distinct_pitches():
     s_out = diarize_speakers(single, [{"start": 0.0, "end": 2.2}, {"start": 2.2, "end": 4.0}, {"start": 4.0, "end": 5.0}], sr=sr, max_speakers=3)
     assert [x["speaker"] for x in s_out] == ["Speaker 1", "Speaker 1", "Speaker 1"]
 
+    # Screenshot scenario: Speaker 1 (131 Hz) -> Speaker 2 (195 Hz) -> Speaker 1 emphasized (164.7 Hz)
+    m1 = generate_synthetic_signal("vowel_ah", duration=1.8, sr=sr, f0=131.0).samples
+    f2 = generate_synthetic_signal("vowel_ee", duration=2.2, sr=sr, f0=195.0).samples
+    m1_emph = generate_synthetic_signal("vowel_ah", duration=2.0, sr=sr, f0=164.7).samples
+    aba_clip = np.concatenate([m1, f2, m1_emph])
+    aba_segs = [{"start": 0.0, "end": 1.8}, {"start": 1.8, "end": 4.0}, {"start": 4.0, "end": 6.0}]
+    aba_out = diarize_speakers(aba_clip, aba_segs, sr=sr, max_speakers=3)
+    assert [x["speaker"] for x in aba_out] == ["Speaker 1", "Speaker 2", "Speaker 1"]
+
+    # Word-level multi-sentence splitting + one-word emphasis tag + vocal rising-pitch question detection
+    from soniccaption.algorithms.enhancement import split_sentences_with_words, analyze_segment_prosody
+    split_res = split_sentences_with_words([{
+        "start": 0.0,
+        "end": 5.0,
+        "text": "Record my voice. Let us see.",
+        "words": [
+            {"word": "Record", "start": 0.2, "end": 0.8},
+            {"word": "voice.", "start": 0.9, "end": 1.6},
+            {"word": "Let", "start": 2.1, "end": 2.4},
+            {"word": "see.", "start": 2.5, "end": 3.0},
+        ],
+    }])
+    assert len(split_res) == 2
+    assert split_res[0]["start"] == 0.2 and split_res[0]["end"] == 1.6
+
+    # Synthetic rising pitch inflection (+50 Hz end-of-phrase) WITHOUT '?' still flags is_question=True
+    t_q = np.linspace(0.0, 1.4, int(1.4 * sr), endpoint=False)
+    f0_q = 120.0 + 55.0 * (t_q / 1.4) ** 2
+    ph_q = np.cumsum(2.0 * np.pi * f0_q / sr)
+    sig_q = (0.5 * np.sin(ph_q) + 0.25 * np.sin(2.0 * ph_q) + 0.12 * np.sin(3.0 * ph_q)).astype(np.float32)
+    pros_q = analyze_segment_prosody(sig_q, [{"start": 0.0, "end": 1.4, "speaker": "Speaker 1", "text": "You updated GitHub"}], sr=sr)
+    assert pros_q[0]["is_question"] is True
+    assert " " not in pros_q[0]["emphasis_tag"] and len(pros_q[0]["emphasis_tag"]) > 2
+
 
 def test_empty_signal_guards():
     empty = np.array([], dtype=np.float32)

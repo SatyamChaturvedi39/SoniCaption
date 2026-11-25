@@ -40,6 +40,20 @@ SOUND_TAGS: dict[str, tuple[str, str]] = {
     "rain": ("Rain", "[Rain]"),
 }
 
+WORKPLACE_CUES: dict[str, str] = {
+    "clapping": "Group applause / agreement cue",
+    "laughing": "Colleagues laughing — social mood cue",
+    "laughter": "Colleagues laughing — social mood cue",
+    "coughing": "Colleague coughing in room",
+    "sneezing": "Colleague sneezing in room",
+    "footsteps": "Door / approach cue — footsteps nearby",
+    "door_wood_knock": "Attention cue — door knock or hand tapping desk",
+    "glass_breaking": "Sharp impact / loud bang on desk or surface",
+    "siren": "Emergency safety alert — siren detected",
+    "dog": "Outside distraction — dog barking",
+    "rain": "Heavy outdoor rain audible",
+}
+
 
 @dataclass
 class FusionConfig:
@@ -115,7 +129,17 @@ def fuse_timeline(speech_segments: list[dict], sound_events: list[dict], vad_seg
             dropped.append({"item": s, "reason": "VAD found almost no speech here (possible ASR hallucination)"})
             continue
         speech_item = {"start": start, "end": end, "text": text, "words": s.get("words", [])}
-        for extra_k in ("speaker", "delivery_style", "mean_f0_hz", "pitch_slope_hz", "energy_ratio", "speaking_rate_wps"):
+        for extra_k in (
+            "speaker",
+            "delivery_style",
+            "emphasis_tag",
+            "is_question",
+            "question_reason",
+            "mean_f0_hz",
+            "pitch_slope_hz",
+            "energy_ratio",
+            "speaking_rate_wps",
+        ):
             if extra_k in s:
                 speech_item[extra_k] = s[extra_k]
         speech.append(speech_item)
@@ -172,7 +196,17 @@ def fuse_timeline(speech_segments: list[dict], sound_events: list[dict], vad_seg
             "overlaps_speech": False,
             "words": s["words"],
         }
-        for extra_k in ("speaker", "delivery_style", "mean_f0_hz", "pitch_slope_hz", "energy_ratio", "speaking_rate_wps"):
+        for extra_k in (
+            "speaker",
+            "delivery_style",
+            "emphasis_tag",
+            "is_question",
+            "question_reason",
+            "mean_f0_hz",
+            "pitch_slope_hz",
+            "energy_ratio",
+            "speaking_rate_wps",
+        ):
             if extra_k in s:
                 sp_out[extra_k] = s[extra_k]
         items.append(sp_out)
@@ -180,7 +214,8 @@ def fuse_timeline(speech_segments: list[dict], sound_events: list[dict], vad_seg
         label, tag = SOUND_TAGS.get(e["label"], (e["label"].replace("_", " ").title(),
                                                  f"[{e['label'].replace('_', ' ').title()}]"))
         items.append({"start": round(e["start"], 3), "end": round(e["end"], 3), "category": "sound_event",
-                      "label": label, "display_text": tag, "confidence": round(float(e["confidence"]), 3),
+                      "label": label, "display_text": tag,
+                      "confidence": round(float(e["confidence"]), 3),
                       "source": e.get("model", "sound-model"), "overlaps_speech": e["overlaps_speech"], "words": []})
     items.sort(key=lambda i: (i["start"], i["category"] != "speech", i["end"]))
     for n, it in enumerate(items, 1):

@@ -231,3 +231,19 @@ def test_query_dtw_and_copilot_archive_qa(tmp_path, monkeypatch):
     assert (max(diag["fft_mag_db"]) - min(diag["fft_mag_db"])) > 15.0
     assert max(diag["lpc_envelope_db"]) == 0.0
     assert min(min(row) for row in diag["stft_matrix"]) >= -75.0
+
+    # Real-time corporate meeting intelligence endpoint
+    live_res = c.post(
+        "/api/v1/meeting/live-intelligence",
+        json={
+            "speech_turns": [
+                {"start": 0.5, "end": 3.0, "speaker": "Speaker 3", "emphasis_tag": "Emphatic", "is_question": False, "text": "I will update GitHub tomorrow."}
+            ],
+            "sound_events": [{"start": 3.2, "end": 4.0, "label": "Laughter", "confidence": 0.90}],
+        },
+    )
+    assert live_res.status_code == 200
+    lj = live_res.json()
+    assert lj["action_items"][0]["owner"] == "Speaker 3"
+    assert "Update GitHub" in lj["action_items"][0]["task"]
+    assert lj["meeting_scenario"]["scenario_label"] != ""

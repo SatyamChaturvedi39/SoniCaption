@@ -59,13 +59,26 @@ export async function sendWatchChunk(
   denoise = true,
   baselineRms = 0,
   modelSource: 'resnet' | 'hf-cnn' = 'resnet',
+  transcribeSpeech = false,
 ) {
   const form = new FormData()
   form.append('file', file)
   form.append('denoise', String(denoise))
   form.append('baseline_rms', String(baselineRms))
   form.append('model_source', modelSource)
+  form.append('transcribe_speech', String(transcribeSpeech))
   return reqJson<any>('/api/v1/watch/chunk', { method: 'POST', body: form })
+}
+
+export async function deriveLiveMeetingIntelligence(
+  speechTurns: any[],
+  soundEvents: any[],
+): Promise<{ summary: string; meeting_scenario: any; action_items: any[]; provider: string }> {
+  return reqJson<any>('/api/v1/meeting/live-intelligence', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ speech_turns: speechTurns, sound_events: soundEvents }),
+  })
 }
 
 export const getSessions = (search = '') =>

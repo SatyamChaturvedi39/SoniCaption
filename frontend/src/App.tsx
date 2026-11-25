@@ -4,10 +4,13 @@ import {
   AlertCircle,
   AudioLines,
   Bot,
+  Briefcase,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
   Download,
   FileAudio,
+  HelpCircle,
   Info,
   Mic,
   Radio,
@@ -19,7 +22,7 @@ import { analyzeAudio, exportResult, getHealth, getSimilarSessions, queryAudioBy
 import { AgentView, EngineSpecsModal, VoiceAuthenticatorView, WatchView } from './components/StudioTabs'
 import { DualLineCanvas, SpectrogramCanvas } from './components/VisualCanvas'
 import { WavePlayer } from './components/WavePlayer'
-import type { Analysis, DtwSpotMatch } from './types'
+import type { ActionItem, Analysis, DtwSpotMatch, MeetingScenario } from './types'
 import { RAW_MIC_CONSTRAINTS, blobToWavFile } from './utils/wavEncoder'
 
 type Tab = 'workspace' | 'authenticator' | 'watch' | 'agent'
@@ -143,9 +146,9 @@ export default function App() {
   const fmt = (s: number) => `${Math.floor(s / 60).toString().padStart(2, '0')}:${Math.floor(s % 60).toString().padStart(2, '0')}`
   const isLive = health?.mode === 'live'
   const nav: [Tab, string, any][] = [
-    ['workspace', 'Audio Studio', AudioLines],
+    ['workspace', 'Meeting Studio', AudioLines],
+    ['watch', 'Live Meeting Radar', Radio],
     ['authenticator', 'AI Voice Authenticator', ShieldCheck],
-    ['watch', 'Live Room Radar', Radio],
     ['agent', 'Voice Copilot', Bot],
   ]
 
@@ -154,10 +157,10 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><AudioLines size={18} /></div>
-          <div><b>SonicVoice Studio</b><small>Acoustic Intelligence</small></div>
+          <div><b>SonicCaption</b><small>Workplace Accessibility</small></div>
         </div>
 
-        <div className="nav-label">Workspace</div>
+        <div className="nav-label">Corporate Suite</div>
         {nav.map(([id, label, Icon]) => (
           <button key={id} className={`nav-item ${tab === id ? 'active' : ''}`} onClick={() => { setTab(id); setError('') }}>
             <Icon size={16} />
@@ -183,7 +186,7 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-title">
             <h1>{nav.find((n) => n[0] === tab)?.[1]}</h1>
-            <span className="topbar-sub">Prosody-Aware Transcription, Spoken DTW Retrieval &amp; Ambient Event Intelligence</span>
+            <span className="topbar-sub">Corporate Meeting Accessibility · Speaker &amp; Room Cues · Action Extraction · Scenario Radar</span>
           </div>
           <div className="topbar-meta">
             <span className={`tag ${isLive ? 'ok' : ''}`}>{isLive ? 'Models + VAD Ready' : 'Mock Fallback'}</span>
@@ -381,7 +384,8 @@ function ResultsView({
   }
 
   const warnings: string[] = data.metrics?.warnings || []
-  const highlights = data.reminders || []
+  const actionItems: ActionItem[] = data.action_items || data.metrics?.action_items || []
+  const scenario: MeetingScenario | undefined = data.meeting_scenario || data.metrics?.meeting_scenario
   const sceneHmm = data.metrics?.scene_hmm
   const prosodyHmm = data.metrics?.prosody_hmm
   const diag = data.metrics?.diagnostics
@@ -439,20 +443,67 @@ function ResultsView({
         </section>
       )}
 
-      {data.summary && (
-        <section className="panel">
-          <div className="panel-header"><h3>Multimodal Audio Synthesis &amp; Key Spoken Highlights</h3></div>
-          <p style={{ margin: '0 0 14px', fontSize: 13.5, lineHeight: 1.6, color: '#e2e8f0' }}>{data.summary}</p>
-          {highlights.length > 0 ? (
-            highlights.map((r, i) => (
-              <div key={i} className="reminder-row">
-                <div><b>{r.title}</b> <span className="sound-chip">{r.due_time}</span></div>
-                <span className="tag">{r.trigger_source}</span>
+      {(scenario?.scenario_label || data.summary) && (
+        <section className="panel" style={{ borderColor: 'rgba(6, 182, 212, 0.35)', background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(18, 21, 34, 0.95))' }}>
+          <div className="panel-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Briefcase size={20} color="#06b6d4" />
+              <div>
+                <small className="muted" style={{ textTransform: 'uppercase', letterSpacing: '0.07em', fontSize: 10 }}>Overarching Corporate Meeting Scenario</small>
+                <h2 style={{ margin: 0, fontSize: 18 }}>{scenario?.scenario_label || 'Workplace Meeting Briefing'}</h2>
               </div>
-            ))
-          ) : null}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {scenario?.meeting_mood && <span className="tag ok">{scenario.meeting_mood}</span>}
+              {(scenario?.speaker_count ?? 0) > 0 && <span className="tag mono">{scenario?.speaker_count} Speaker{(scenario?.speaker_count ?? 0) > 1 ? 's' : ''}</span>}
+              {(scenario?.question_count ?? 0) > 0 && <span className="sound-chip"><HelpCircle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />{scenario?.question_count} Question{(scenario?.question_count ?? 0) > 1 ? 's' : ''} Flagged</span>}
+            </div>
+          </div>
+          {data.summary && <p style={{ margin: '0 0 12px', fontSize: 13.5, lineHeight: 1.6, color: '#e2e8f0' }}>{data.summary}</p>}
+          {(scenario?.active_cues?.length ?? 0) > 0 && (
+            <div className="tag-row">
+              {scenario?.active_cues?.map((cue: string, i: number) => (
+                <span key={i} className="tag">{cue}</span>
+              ))}
+            </div>
+          )}
         </section>
       )}
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h3><ClipboardCheck size={16} style={{ verticalAlign: 'middle', marginRight: 7, color: '#10b981' }} />Automated Action Items &amp; Spoken Commitments ({actionItems.length})</h3>
+            <p className="muted" style={{ margin: '2px 0 0' }}>Tasks mapped to the responsible speaker, deliverable, and deadline. Click a timestamp to jump directly to the commitment.</p>
+          </div>
+        </div>
+        {actionItems.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>
+            No explicit spoken commitments detected in this recording. Say phrases like &ldquo;Speaker 3 will update GitHub tomorrow&rdquo; or &ldquo;I&apos;ll send the report by 5 PM&rdquo; to auto-assign tasks.
+          </p>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr><th>Owner</th><th>Deliverable Task</th><th>Deadline</th><th>Priority</th><th>Cue</th></tr>
+            </thead>
+            <tbody>
+              {actionItems.map((a, idx) => (
+                <tr key={idx}>
+                  <td><span className="tag ok">{a.owner}</span></td>
+                  <td><b>{a.task}</b>{a.source_quote ? <div className="muted" style={{ fontSize: 11 }}>&ldquo;{a.source_quote}&rdquo;</div> : null}</td>
+                  <td><span className="sound-chip">{a.deadline}</span></td>
+                  <td className="mono">{a.priority}</td>
+                  <td>
+                    <button className="secondary-btn" style={{ padding: '4px 9px', fontSize: 11 }} onClick={() => onSeek(a.timestamp_s || 0)}>
+                      {(a.timestamp_s ?? 0).toFixed(1)}s ↗
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       {audioUrl && (
         <section className="panel">
@@ -464,8 +515,8 @@ function ResultsView({
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h3>Chronological Caption &amp; Prosody Timeline</h3>
-            <p className="muted" style={{ margin: '2px 0 0' }}>Click any row to seek playback. Speech rows include vocal pitch &amp; prosody delivery tags.</p>
+            <h3>Chronological Meeting Captions, Emphasis &amp; Room Cues</h3>
+            <p className="muted" style={{ margin: '2px 0 0' }}>Every sentence is annotated with a one-word acoustic emphasis tag, rising-pitch question detection, and workplace room sound alerts.</p>
           </div>
           <div className="export-bar">
             <Download size={14} color="#94a3b8" />
@@ -480,23 +531,50 @@ function ResultsView({
           <p className="muted">No speech or foreground events exceeded calibrated room thresholds.</p>
         ) : (
           <div className="timeline">
-            {data.timeline.map((item) => (
-              <button key={item.id} className={`timeline-row ${item.category}`} onClick={() => onSeek(item.start)}>
-                <span className="time">{item.start.toFixed(2)}s – {item.end.toFixed(2)}s</span>
-                <span className="actor">{item.category === 'speech' ? (item.speaker || item.label || 'Speaker 1') : item.label}</span>
-                <span className="body">
-                  {item.display_text}
-                  {item.category === 'speech' && item.delivery_style && (
-                    <span className="sound-chip" style={{ marginLeft: 8 }}>
-                      {item.delivery_style}
-                      {item.mean_f0_hz ? ` · ${item.mean_f0_hz} Hz` : ''}
-                      {item.speaking_rate_wps ? ` · ${item.speaking_rate_wps} w/s` : ''}
-                    </span>
-                  )}
-                </span>
-                <span className="conf">{item.confidence != null ? `${(item.confidence * 100).toFixed(1)}%` : ''}</span>
-              </button>
-            ))}
+            {data.timeline.map((item) => {
+              const spk = item.speaker || item.label || 'Speaker 1'
+              const spkColor = spk.includes('2') ? '#c084fc' : spk.includes('3') ? '#10b981' : '#22d3ee'
+              return (
+                <button key={item.id} className={`timeline-row ${item.category}`} onClick={() => onSeek(item.start)}>
+                  <span className="time">{item.start.toFixed(2)}s – {item.end.toFixed(2)}s</span>
+                  <span className="actor" style={item.category === 'speech' ? { color: spkColor } : { color: '#f59e0b' }}>
+                    {item.category === 'speech' ? spk : item.label}
+                  </span>
+                  <span className="body">
+                    <span style={{ color: '#f8fafc' }}>{item.display_text}</span>
+                    {item.category === 'speech' && (
+                      <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap', marginLeft: 8, verticalAlign: 'middle' }}>
+                        {item.emphasis_tag && (
+                          <span
+                            className="tag"
+                            style={{
+                              padding: '2px 8px',
+                              fontSize: 10.5,
+                              borderColor: item.emphasis_tag === 'Urgent' ? 'rgba(239,68,68,0.5)' : item.emphasis_tag === 'Emphatic' ? 'rgba(245,158,11,0.5)' : 'rgba(168,85,247,0.4)',
+                              color: item.emphasis_tag === 'Urgent' ? '#fca5a5' : item.emphasis_tag === 'Emphatic' ? '#fde68a' : '#d8b4fe',
+                            }}
+                          >
+                            {item.emphasis_tag}
+                          </span>
+                        )}
+                        {item.is_question && (
+                          <span className="sound-chip" style={{ background: 'rgba(6, 182, 212, 0.16)', borderColor: 'rgba(6, 182, 212, 0.45)', color: '#67e8f9' }}>
+                            ? QUESTION{item.question_reason ? ` · ${item.question_reason}` : ''}
+                          </span>
+                        )}
+                        {item.mean_f0_hz ? (
+                          <span className="muted mono" style={{ fontSize: 11 }}>{item.mean_f0_hz} Hz · {item.speaking_rate_wps ?? 0} w/s</span>
+                        ) : null}
+                      </span>
+                    )}
+                    {item.category === 'sound_event' && item.workplace_cue && (
+                      <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>{item.workplace_cue}</div>
+                    )}
+                  </span>
+                  <span className="conf">{item.confidence != null ? `${(item.confidence * 100).toFixed(1)}%` : ''}</span>
+                </button>
+              )
+            })}
           </div>
         )}
       </section>

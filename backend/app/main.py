@@ -62,6 +62,7 @@ try:
         extract_clip_signature,
         find_similar_sessions_dtw,
         spectral_subtraction_denoise,
+        split_sentences_with_words,
         subsequence_dtw_search,
     )
     from soniccaption.algorithms.hmm import (
@@ -82,7 +83,7 @@ try:
     from soniccaption.services import agent_service, session_store
     from soniccaption.services.asr_service import ASRError, transcribe_audio
     from soniccaption.services.sound_cnn import detect_sound_events
-    from soniccaption.timeline.fusion import FusionConfig, _covered, fuse_timeline
+    from soniccaption.timeline.fusion import FusionConfig, WORKPLACE_CUES, _covered, fuse_timeline
 
     HAS_LIVE_MODEL = True
     LIVE_IMPORT_ERROR: Optional[str] = None
@@ -329,7 +330,8 @@ def _run_multimodal_core(
     asr_time_ms = round((time.perf_counter() - t_asr) * 1000, 1)
 
     pitch_stats = estimate_pitch_contour(active_samples, sr=sample_rate)
-    diarized_speech = diarize_speakers(active_samples, raw_speech, sr=sample_rate, max_speakers=3)
+    sentence_speech = split_sentences_with_words(raw_speech)
+    diarized_speech = diarize_speakers(active_samples, sentence_speech, sr=sample_rate, max_speakers=3)
     prosody_speech = analyze_segment_prosody(active_samples, diarized_speech, sr=sample_rate)
 
     # When speech is present, the quietest non-speech frames measure the ambient room/fan floor
@@ -369,12 +371,15 @@ def _run_multimodal_core(
     )
     timeline = fused["timeline"]
 
-    # Ensure speaker label is propagated safely onto speech items
+    # Ensure speaker label & workplace cues are populated cleanly on timeline items
     for item in timeline:
         if item["category"] == "speech":
             speaker = item.get("speaker", "Speaker 1")
             item["speaker"] = speaker
             item["label"] = speaker
+        elif item["category"] == "sound_event":
+            raw_k = agent_service.canonical_sound_key(item.get("label", ""))
+            item["workplace_cue"] = WORKPLACE_CUES.get(raw_k, f"Acoustic room event: {item.get('label', '')}")
 
     speech_segments = [
         {
@@ -385,6 +390,9 @@ def _run_multimodal_core(
             "text": item["display_text"],
             "words": item.get("words", []),
             "delivery_style": item.get("delivery_style", "Steady Statement"),
+            "emphasis_tag": item.get("emphasis_tag", "Neutral"),
+            "is_question": bool(item.get("is_question", False)),
+            "question_reason": item.get("question_reason", "Statement contour"),
             "mean_f0_hz": item.get("mean_f0_hz", 0.0),
             "energy_ratio": item.get("energy_ratio", 1.0),
             "speaking_rate_wps": item.get("speaking_rate_wps", 0.0),
@@ -515,6 +523,8 @@ async def analyze_audio(
             "dropped_events": res["fused"]["dropped"],
             "warnings": res["asr_warnings"],
             "summary": insights["summary"],
+            "action_items": insights.get("action_items", []),
+            "meeting_scenario": insights.get("meeting_scenario", {}),
             "insights_provider": insights["provider"],
             "scene_hmm": res["scene_hmm"],
             "prosody_hmm": res["prosody_hmm"],
@@ -576,6 +586,8 @@ async def analyze_audio(
             "sample_rate": res["sample_rate"],
             "mode": "live",
             "summary": insights["summary"],
+            "action_items": insights.get("action_items", []),
+            "meeting_scenario": insights.get("meeting_scenario", {}),
             "reminders": saved_reminders if saved_reminders else insights["reminders"],
             "similar_sessions": similar_sessions,
             "speech_segments": res["speech_segments"],
@@ -773,8 +785,9 @@ async def watch_ambient_chunk(
     denoise: bool = Form(True),
     baseline_rms: float = Form(0.0),
     model_source: str = Form("resnet"),
+    transcribe_speech: bool = Form(False),
 ):
-    """Low-latency ambient monitoring chunk handler for Live Safety Watch Mode."""
+    """Low-latency meeting stream handler for Live Meeting Radar (sound cues + optional live ASR/prosody)."""
     if not HAS_LIVE_MODEL:
         raise HTTPException(status_code=503, detail="Live ML pipeline unavailable.")
 
@@ -807,7 +820,28 @@ async def watch_ambient_chunk(
             model_source=model_source,
         )
         # ESC-50 lacks a speech class: suppress event labels triggered by the user talking
-        events = [ev for ev in raw_events if _covered(ev["start"], ev["end"], vad_segs) < 0.30]
+        from soniccaption.timeline.fusion import WORKPLACE_CUES
+        events = []
+        for ev in raw_events:
+            if _covered(ev["start"], ev["end"], vad_segs) < 0.30:
+                ev["workplace_cue"] = WORKPLACE_CUES.get(ev["label"], ev["label"])
+                events.append(ev)
+
+        speech_chunks: List[Dict[str, Any]] = []
+        if transcribe_speech and vad_segs:
+            import soundfile as sf
+            asr_wav = wav_path
+            if denoise:
+                fd_c, asr_wav = tempfile.mkstemp(suffix=".wav")
+                os.close(fd_c)
+                cleanup_paths.append(asr_wav)
+                sf.write(asr_wav, active, 16000, subtype="PCM_16")
+            try:
+                asr_res = transcribe_audio(asr_wav)
+                sent_segs = split_sentences_with_words(asr_res.get("segments", []))
+                speech_chunks = analyze_segment_prosody(active, sent_segs, sr=16000)
+            except ASRError:
+                speech_chunks = []
 
         urgent_alert = None
         for ev in events:
@@ -818,7 +852,7 @@ async def watch_ambient_chunk(
                     event_label=ev["label"],
                     confidence=float(ev["confidence"]),
                     severity=sev,
-                    snippet_text=f"{desc} (Live Watch Mode)",
+                    snippet_text=f"{desc} (Live Meeting Radar)",
                 )
                 break
 
@@ -826,12 +860,29 @@ async def watch_ambient_chunk(
             "rms_db": rms_db,
             "noise_rms": round(rms, 5),
             "has_speech": len(vad_segs) > 0,
+            "speech_chunks": speech_chunks,
             "events": events,
             "urgent_alert": urgent_alert,
             "snr_gain_db": den_info.get("snr_gain_db", 0.0),
         }
     finally:
         _cleanup_files(cleanup_paths)
+
+
+@app.post("/api/v1/meeting/live-intelligence")
+async def compute_live_meeting_intelligence(payload: Dict[str, Any] = Body(...)):
+    """Continuously derive corporate meeting scenario, mood, and speaker-assigned action items."""
+    if not HAS_LIVE_MODEL:
+        raise HTTPException(status_code=503, detail="Live ML pipeline unavailable.")
+    speech_turns = payload.get("speech_turns") or []
+    sound_events = payload.get("sound_events") or []
+    insights = agent_service.extract_session_insights(speech_turns, sound_events)
+    return {
+        "summary": insights["summary"],
+        "meeting_scenario": insights.get("meeting_scenario", {}),
+        "action_items": insights.get("action_items", []),
+        "provider": insights.get("provider", "rule-based-local"),
+    }
 
 
 # --------------------------------------------------------------------------- History, Reminders & Alerts CRUD

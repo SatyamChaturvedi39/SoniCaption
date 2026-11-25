@@ -29,7 +29,7 @@
 \begin{center}
 
 % Project Title
-\Large \textbf{SONICCAPTION: MULTIMODAL SPEECH TRANSCRIPTION AND AMBIENT ACOUSTIC EVENT CAPTIONING}\\[0.46in]
+\Large \textbf{SONICCAPTION: A CORPORATE MEETING INTELLIGENCE AND MULTIMODAL SPEECH ACCESSIBILITY PLATFORM FOR DEAF PROFESSIONALS}\\[0.44in]
 
 \begin{table}[h]
 \centering
@@ -61,12 +61,12 @@ November 2026
 % =========================================================================
 % ABSTRACT PAGE
 % =========================================================================
-\title{\textbf{SonicCaption: Multimodal Speech Transcription and Ambient Acoustic Event Captioning}}
+\title{\textbf{SonicCaption: A Corporate Meeting Intelligence and Multimodal Speech Accessibility Platform for Deaf Professionals}}
 \date{November 2026}
 \maketitle
 
 \begin{abstract}
-Traditional Automated Speech Recognition (ASR) systems are fundamentally designed to transcribe spoken linguistic phonemes into text, but they remain entirely deaf to environmental and non-speech acoustic events. In real-world media, everyday videos, and security environments, non-verbal acoustic cues---such as a knock on a door, an audience bursting into applause, laughter, footsteps, glass breaking, or an approaching siren---carry essential context. For over 430 million deaf and hard-of-hearing individuals globally, the absence of these environmental cues creates a severe information barrier. In this work, we design, implement, and deploy \textbf{SonicCaption}, an intelligent end-to-end multimodal audio captioning system. SonicCaption establishes a rigorous from-scratch Digital Signal Processing (DSP) foundation---including $16\text{ kHz}$ polyphase resampling, pre-emphasis filtering ($\alpha=0.97$), Hamming windowing, Short-Time Fourier Transforms (STFT), $40$-channel psychoacoustic Mel filter-banks, $13$ Mel-Frequency Cepstral Coefficients (MFCCs) with dynamic deltas, Levinson-Durbin Linear Predictive Coding (LPC) vocal tract formant extraction, Vector Quantization (VQ), and Dynamic Time Warping (DTW). Parallel to this, we construct a deep acoustic event classifier utilizing a pretrained ResNet-18 backbone adapted for 1-channel log-Mel spectrograms with SpecAugment regularization, achieving a \textbf{peak validation accuracy of $88.75\%$} on Fold~4, a \textbf{strictly held-out test accuracy of $80.00\%$} ($80$ unseen clips across $10$ balanced classes on ESC-50), and a \textbf{macro-averaged $F_1$-score of $0.787$}. These non-speech acoustic cues are chronologically fused with Groq-accelerated Whisper speech-to-text transcripts using Voice Activity Detection (VAD) into industry-standard SubRip (\texttt{.srt}) and WebVTT (\texttt{.vtt}) subtitle formats. The entire product is delivered via a modern React 18 single-page application featuring WaveSurfer.js waveform visualization, dual-track timeline seeking, and interactive pedagogical laboratory visualizers.
+Standard speech-to-text tools turn spoken words into plain captions, but they miss who is speaking, how a sentence is delivered, and what happens in the room around the speakers. During workplace meetings, deaf and hard-of-hearing employees lose vital context such as rising vocal pitch that signals a question, urgent emphasis, background laughter, a door knock, a hand banging on a desk, or tasks promised to specific teammates. In this project, we present \textbf{SonicCaption}, a corporate meeting assistant built on top of classical Digital Signal Processing (DSP) and modern deep learning. First, audio is cleaned using Spectral Subtraction denoising to reduce steady fan or room hum, and broken down from first principles using STFT spectrograms, $40$-band Mel filter-banks, $13$ MFCCs, Linear Predictive Coding (LPC) vocal-tract formants, Dynamic Time Warping (DTW), and Hidden Markov Models (HMMs). Next, Whisper transcripts and Silero Voice Activity Detection (VAD) feed a speaker diarizer that separates speakers by voice timbre and pitch, attaches a one-word emphasis tag to each sentence, and flags rising-pitch questions. In parallel, a fine-tuned ResNet-18 sound classifier recognizes $10$ workplace and safety sound events on ESC-50 with \textbf{$88.75\%$ validation accuracy}, \textbf{$80.00\%$ held-out test accuracy}, and a \textbf{$0.787$ macro-$F_1$ score}. SonicCaption also checks vocal micro-pitch jitter and amplitude shimmer to spot AI-generated synthetic voices, extracts action items mapped to \textit{Owner}, \textit{Task}, and \textit{Deadline}, and detects the live meeting scenario. Everything runs through a React and FastAPI web application verified by \textbf{$99/99$ automated tests}.
 \end{abstract}
 
 \newpage
@@ -75,41 +75,38 @@ Traditional Automated Speech Recognition (ASR) systems are fundamentally designe
 % SECTION 1: INTRODUCTION
 % =========================================================================
 \section{Introduction}
-Human verbal communication is inherently multimodal. When humans converse, the transmitted acoustic pressure wave carries both linguistic information (the semantic words spoken) and paralinguistic or environmental context (laughter, coughing, room reverberation, and background events) \cite{rabiner1993fundamentals}. According to the World Health Organization (WHO), more than $5\%$ of the world's population ($430\text{ million}$ people) require rehabilitation to address disabling hearing loss. For these individuals, captions and subtitles are the primary medium of media consumption.
+Communication in a workplace meeting is much richer than plain written words. Tone of voice tells listeners whether a colleague is making an urgent warning, hesitating, or asking a question. Non-speech sounds in the room---such as group applause, laughter, someone knocking on a door, or a hand banging on a desk---carry important social and situational cues \cite{rabiner1993fundamentals}. Worldwide, more than $430\text{ million}$ people live with disabling hearing loss, yet popular transcription tools like standard Whisper \cite{radford2023robust} or Google Live Transcribe focus only on words. They either ignore room sounds completely or hide who spoke, what tone was used, and what follow-up tasks were agreed upon.
 
-Broadcast closed-captioning standards mandated by regulatory bodies (such as the United States Federal Communications Commission) legally require that non-speech audio information that is crucial to the comprehension of a program---such as \texttt{[Door Knock]}, \texttt{[Applause]}, or \texttt{[Siren]}---must be presented in textual brackets alongside spoken dialogue. However, commercial automated transcription platforms (e.g., OpenAI Whisper \cite{radford2023robust}, Google Live Transcribe) operate as single-stream linguistic decoders: they attempt to map all acoustic inputs to words in a dictionary. When faced with environmental sounds, these systems either output silence or produce hallucinations (e.g., transcribing applause as random repetitive syllables). Consequently, multimedia studios currently spend between $\$1.50$ and $\$3.00$ per minute of media on human stenographers to manually insert sound effect tags.
-
-To overcome this fundamental limitation, we present \textbf{SonicCaption}. SonicCaption is designed around a dual-stream architecture:
+Steady indoor noise, such as a classroom ceiling fan, can also confuse basic sound detectors, while AI voice synthesis creates new risks around voice authenticity. To address these gaps cleanly, \textbf{SonicCaption} brings together five clear capabilities:
 \begin{enumerate}
-    \item \textbf{Stream A (Acoustic Scene Intelligence):} A deep 2D convolutional network fine-tuned on log-Mel spectrograms that detects ambient and human non-speech events with high temporal precision.
-    \item \textbf{Stream B (Linguistic Speech Recognition):} An ASR engine accelerated via the Groq LPU inference cloud that transcribes spoken dialogue into timestamped phrases.
-    \item \textbf{Timeline Fusion Engine:} A temporal alignment algorithm that interleaves speech phrases with environmental sound badges chronologically into standard subtitle files.
+    \item \textbf{Noise Cleaning \& Core Signal Analysis:} Cleans steady background hum with Spectral Subtraction, and extracts classic speech features (Mel spectrograms, MFCCs, LPC formants, DTW similarity, and HMM smoothing).
+    \item \textbf{Speaker Separation, Emphasis \& Question Flags:} Splits transcripts into individual sentences, identifies who spoke (\texttt{Speaker 1}, \texttt{Speaker 2}, \texttt{Speaker 3}), adds a one-word emphasis label to every sentence, and highlights questions using vocal pitch rise.
+    \item \textbf{Workplace Room Sound Alerts:} Uses a trained ResNet-18 classifier with speech-overlap filtering to detect real room cues such as laughter, clapping, door knocks, desk bangs, footsteps, and sirens.
+    \item \textbf{AI Voice Authenticity Check:} Measures natural vocal-fold variations (jitter, shimmer, glottal residual, and high-frequency energy) to distinguish real human speech from synthetic TTS voices.
+    \item \textbf{Corporate Meeting Copilot:} Automatically turns spoken promises into structured action items (\textit{Owner}, \textit{Deliverable}, \textit{Deadline}) and tracks the live meeting scenario inside an interactive web dashboard.
 \end{enumerate}
-Furthermore, the project bridges the gap between deep learning and classical acoustic theory by implementing every signal processing transform from first mathematical principles in interactive Jupyter Notebooks and exposing them through an interactive web studio.
 
 % =========================================================================
 % SECTION 2: RELATED WORKS
 % =========================================================================
 \section{Related Works}
-Speech signal processing has evolved through distinct paradigms over the past five decades \cite{rabiner2007introduction}. Early automated speech recognition relied on template matching using Dynamic Time Warping (DTW) \cite{sakoe1978dynamic} to compensate for non-linear speaking rates. This was superseded by statistical sequence modeling using Hidden Markov Models (HMM) and Gaussian Mixture Models (GMM) \cite{rabiner1993fundamentals}, which parameterized speech through acoustic observation probabilities and phonemic state transitions.
+Speech processing has grown through several well-known stages: template alignment using Dynamic Time Warping (DTW) \cite{sakoe1978dynamic}, statistical sequence decoding using Hidden Markov Models (HMMs) \cite{rabiner1989tutorial, rabiner1993fundamentals}, and cepstral features like MFCCs modeled on human hearing \cite{davis1980comparison}. For noise reduction, Boll's Spectral Subtraction \cite{boll1979suppression} remains a fast and reliable way to remove steady background noise without heavy compute.
 
-In modern deep learning, acoustic feature extraction has converged on time-frequency representations, specifically Mel-Frequency Cepstral Coefficients (MFCCs) and log-Mel spectrograms \cite{davis1980comparison}. In the field of Environmental Sound Classification (ESC), Piczak established the benchmark ESC-50 dataset \cite{piczak2015esc} and demonstrated that 2D convolutional networks outperform handcrafted acoustic descriptors by learning spatial edge and harmonic filters directly from spectrogram images. He et al. \cite{he2016deep} introduced Residual Networks (ResNet) to solve the vanishing gradient problem in deep architectures, enabling effective transfer learning. To combat overfitting on scarce audio samples, Park et al. \cite{park2019specaugment} proposed SpecAugment, which masks blocks of time frames and frequency channels during training.
-
-While state-of-the-art ASR models such as Whisper \cite{radford2023robust} have achieved near-human Word Error Rates across diverse accents, they treat background audio purely as noise to be suppressed. Table \ref{tab:sota} summarizes the comparison between existing approaches and SonicCaption.
+For non-speech sound recognition, Piczak's ESC-50 dataset \cite{piczak2015esc} serves as a standard benchmark, where deep convolutional networks like ResNet-18 \cite{he2016deep} paired with SpecAugment masking \cite{park2019specaugment} perform strongly on log-Mel spectrogram images. Modern ASR systems such as Whisper \cite{radford2023robust} transcribe words very accurately, but they treat background sounds as unwanted noise and offer no task extraction, emphasis tagging, or voice authenticity check. Table \ref{tab:sota} compares existing tools with SonicCaption.
 
 \begin{table*}[!ht]
 \centering
-\caption{Comparative Analysis of State-of-the-Art Speech and Audio Systems vs. SonicCaption}
+\caption{Comparison of Existing Speech/Audio Tools vs.\ SonicCaption}
 \vspace{4pt}
-\scalebox{0.92}{
-\begin{tabular}{@{}llllll@{}}
+\scalebox{0.84}{
+\begin{tabular}{@{}lllllll@{}}
 \toprule
-\textbf{System / Architecture} & \textbf{Primary Domain} & \textbf{Speech ASR} & \textbf{Acoustic Events} & \textbf{DSP Transparency} & \textbf{Export Formats} \\ \midrule
-Standard Whisper \cite{radford2023robust} & Speech Transcription & Yes (SOTA) & No (Suppressed) & Opaque (Black-box) & Text, JSON, SRT \\
-PANNs / AudioSet & Acoustic Tagging & No & Yes ($527$ classes) & Feature-level & Raw Tag Probabilities \\
-Google Live Transcribe & Real-Time ASR & Yes & Partial (Icons only) & Proprietary & None (Display only) \\
-Traditional DTW/HMM \cite{sakoe1978dynamic} & Isolated Word Rec. & Limited Vocab & No & Explicit Math & Internal Alignment \\ \midrule
-\textbf{SonicCaption (Proposed)} & \textbf{Multimodal Captioning} & \textbf{Yes (Whisper)} & \textbf{Yes ($80.0\%$ Test ResNet)} & \textbf{From-Scratch Labs} & \textbf{SRT, VTT, JSON, CSV} \\ \bottomrule
+\textbf{System} & \textbf{Speech + Speakers} & \textbf{Emphasis \& Questions} & \textbf{Room Cues} & \textbf{Tasks \& Scenario} & \textbf{AI Voice Check} & \textbf{Exports} \\ \midrule
+Standard Whisper \cite{radford2023robust} & Text only & Punctuation only & No & No & No & SRT, JSON \\
+PANNs / AudioSet & No & No & Yes ($527$ tags) & No & No & Raw tags \\
+Google Live Transcribe & Live text & No & Basic icons & No & No & None \\
+Classic DTW/HMM \cite{sakoe1978dynamic} & Small vocab & No & No & No & No & Internal only \\ \midrule
+\textbf{SonicCaption} & \textbf{Whisper + Speakers} & \textbf{1-Word + Pitch Rise} & \textbf{ResNet-18 ($80\%$)} & \textbf{Yes (Groq + Rules)} & \textbf{Yes (Biometric)} & \textbf{5 Formats} \\ \bottomrule
 \end{tabular}
 }
 \label{tab:sota}
@@ -119,99 +116,125 @@ Traditional DTW/HMM \cite{sakoe1978dynamic} & Isolated Word Rec. & Limited Vocab
 % SECTION 3: PROJECT OBJECTIVES
 % =========================================================================
 \section{Project Objectives}
-The concrete engineering and research objectives of this project are:
+The main engineering goals of SonicCaption are:
 \begin{itemize}
-    \item \textbf{Objective 1 (Standardized Audio Ingest):} Develop an audio ingestion pipeline supporting multi-format loading (WAV, MP3, FLAC, OGG), stereo-to-mono downmixing, and $16\text{ kHz}$ polyphase anti-aliasing resampling.
-    \item \textbf{Objective 2 (First-Principles DSP Implementation):} Implement classical speech signal processing algorithms from scratch in Python/NumPy---including pre-emphasis filtering, Hamming windowing, STFT power spectrograms, 40-channel Mel filter-banks, 13-MFCCs with dynamic deltas, Levinson-Durbin LPC vocal tract modeling, Vector Quantization (VQ), and Dynamic Time Warping (DTW).
-    \item \textbf{Objective 3 (Acoustic Scene Modeling):} Train and fine-tune a deep 2D convolutional neural network (ResNet-18) with SpecAugment on the ESC-50 dataset under a strict leak-free fold partition, targeting $\ge 80\%$ held-out accuracy across 10 balanced environmental classes.
-    \item \textbf{Objective 4 (Dual-Stream Chronological Fusion):} Design a timeline alignment engine integrating Voice Activity Detection (VAD) and Groq-accelerated Whisper ASR to generate standard \texttt{.srt} and \texttt{.vtt} subtitle files embedding sound cue brackets.
-    \item \textbf{Objective 5 (Full-Stack Deployment \& Visual Labs):} Deploy an interactive React 18 web application with WaveSurfer.js waveform scrubbing, dual-track timeline seek, and interactive educational visualizers for signal analysis.
+    \item \textbf{Clean Audio Processing from First Principles:} Build our own Python DSP modules for $16\text{ kHz}$ resampling, Spectral Subtraction denoising, STFT spectrograms, Mel filter-banks, MFCCs, LPC formants, VQ, DTW, and HMMs.
+    \item \textbf{Clear Multi-Speaker \& Tone Captions:} Separate speakers accurately, label every sentence with a single emphasis word, and warn users whenever a rising voice tone indicates a question.
+    \item \textbf{Reliable Room Sound Detection:} Train a $10$-class ResNet-18 model on ESC-50 using a strict leak-free split ($\ge 80\%$ test accuracy) while blocking false alarms caused by human voices or ceiling fans.
+    \item \textbf{Synthetic Voice Screening:} Provide a dedicated checker to flag overly smooth AI-generated speech versus natural human voices.
+    \item \textbf{Actionable Meeting Assistant:} Extract spoken tasks with speaker owner and deadline, infer the live meeting topic, and deliver everything in an easy-to-use React + FastAPI web studio.
 \end{itemize}
 
 % =========================================================================
-% SECTION 4: PROPOSED METHODOLOGY
+% SECTION 4: SYSTEM ARCHITECTURE & METHODOLOGY
 % =========================================================================
-\section{Proposed Methodology}
+\section{System Architecture \& Methodology}
 
-The overall architecture of SonicCaption operates across four interconnected stages:
-
-\subsection{Audio Acquisition \& Pre-Emphasis Filtering}
-Uploaded audio is converted to mono and resampled to $f_s = 16{,}000\text{ Hz}$. In human speech production, glottal air volume velocity introduces a spectral tilt of approximately $-6\text{ dB/octave}$. To equalize high-frequency energy (such as unvoiced fricatives and sharp acoustic transients), a first-order FIR pre-emphasis filter is applied:
+\subsection{Audio Cleaning \& Noise Reduction}
+Every uploaded clip or live microphone recording is converted to mono and resampled to $16{,}000\text{ Hz}$. A pre-emphasis filter boosts higher frequencies cleanly before splitting the audio into overlapping $25\text{ ms}$ frames using a Hamming window:
 \begin{equation}
-y[n] = x[n] - \alpha \cdot x[n-1], \quad \text{where } \alpha = 0.97
-\end{equation}
-This compensates for high-frequency attenuation, ensuring uniform spectral representation across all frequency bands.
-
-\subsection{Short-Time Framing \& Hamming Windowing}
-Audio signals are statistically non-stationary over long durations but quasi-stationary over short intervals. We frame the signal into segments of length $N = 400\text{ samples}$ ($25\text{ ms}$) with a hop size of $M = 160\text{ samples}$ ($10\text{ ms}$), providing a $60\%$ frame overlap. To prevent spectral leakage caused by rectangular window discontinuities, each frame is multiplied by a Hamming window:
-\begin{equation}
-w[n] = 0.54 - 0.46 \cos\left(\frac{2\pi n}{N - 1}\right), \quad 0 \le n \le N-1
+y[n] = x[n] - 0.97 \cdot x[n-1], \qquad w[n] = 0.54 - 0.46 \cos\!\left(\frac{2\pi n}{N - 1}\right)
 \end{equation}
 
-\subsection{Psychoacoustic Mel Filter-Banks \& MFCC Extraction}
-Human frequency perception is approximately linear below $1000\text{ Hz}$ and logarithmic above $1000\text{ Hz}$. We map physical frequency $f\text{ (Hz)}$ to the subjective Mel pitch scale:
+To remove steady classroom or office background hum (such as fans or air conditioning), SonicCaption uses Boll magnitude Spectral Subtraction \cite{boll1979suppression}. It estimates background noise from the quietest $30\%$ of frames, subtracts it smoothly using an over-subtraction factor of $1.6$ with a safe spectral floor of $0.08$, and lowers low-frequency rumble below $65\text{ Hz}$ while keeping human speech ($>75\text{ Hz}$) untouched:
 \begin{equation}
-m = 2595 \cdot \log_{10}\left(1 + \frac{f}{700}\right)
+G(m, \omega) = \text{clip}\!\left(1 - 1.6\frac{\hat{D}(\omega)}{|\bar{X}(m, \omega)|},\; 0.08,\; 1.0\right)
 \end{equation}
-We construct a filter-bank of $40$ overlapping triangular filters spanning $0\text{ to }8000\text{ Hz}$. Multiplying the STFT power spectrum $|X(m, k)|^2$ by the filter-bank matrix yields $40$ log-energies per frame. Applying the Discrete Cosine Transform (DCT-II) decorrelates the energy coefficients into $13$ static MFCCs:
+
+\subsection{Mel Filter-Banks \& MFCC Feature Extraction}
+Human hearing notices fine pitch differences at low frequencies better than high frequencies. We map physical frequency $f$ onto the Mel scale $m = 2595 \log_{10}(1 + f/700)$ using $40$ overlapping triangular filters, then apply a Discrete Cosine Transform (DCT) to obtain $13$ static MFCCs plus delta ($\Delta$) and delta-delta ($\Delta\Delta$) motion features:
 \begin{equation}
-c_n = \sum_{m=1}^{M} S_m \cos\left(\frac{\pi n (m - 0.5)}{M}\right), \quad 0 \le n \le 12
+c_n = \sum_{m=1}^{40} S_m \cos\!\left(\frac{\pi n (m - 0.5)}{40}\right), \quad 0 \le n \le 12
 \end{equation}
-First-order velocity ($\Delta$) and second-order acceleration ($\Delta\Delta$) polynomials are appended, yielding a $39$-dimensional descriptor. Figure \ref{fig:feature_bridge} confirms the mathematical equivalence between our from-scratch DSP formulas and GPU-accelerated PyTorch tensors.
+Figure \ref{fig:feature_bridge} shows that our custom NumPy feature code matches standard GPU TorchAudio outputs directly.
 
 \begin{figure*}[!ht]
 \centering
-\includegraphics[width=0.95\textwidth]{Figures/fig2_custom_dsp_vs_torchaudio_features.png}
-\caption{Mathematical Equivalence Verification: Custom DSP formulas from first principles (left) vs. GPU-accelerated TorchAudio log-Mel transforms (center) and 13-MFCC cepstral coefficients (right).}
+\includegraphics[width=0.92\textwidth]{Figures/fig2_custom_dsp_vs_torchaudio_features.png}
+\caption{Verification of our from-scratch DSP pipeline (left) against PyTorch/TorchAudio log-Mel spectrograms and 13-MFCC features.}
 \label{fig:feature_bridge}
 \end{figure*}
 
-\subsection{Vocal Tract Modeling: Linear Predictive Coding (LPC)}
-Under the all-pole acoustic filter model, each sample is predicted as a linear combination of the past $p=16$ samples: $\hat{s}[n] = -\sum_{k=1}^{p} a_k s[n-k]$. We implement the Levinson-Durbin recursion to solve the Yule-Walker autocorrelation equations in $\mathcal{O}(p^2)$ time. Finding the complex roots of the polynomial $A(z) = 1 + \sum_{k=1}^{p} a_k z^{-k}$ provides the resonant vocal tract formant frequencies $F_i = (\theta_i \cdot f_s) / (2\pi)$.
+\subsection{LPC Vocal-Tract Analysis \& AI Voice Authenticator}
+Human vowels resonate inside the vocal tract at peak frequencies called formants ($F_1, F_2, F_3$). Using order-$16$ Linear Predictive Coding (LPC) and Levinson-Durbin recursion, SonicCaption models the smooth vocal-tract spectral envelope and verifies filter stability via PARCOR reflection coefficients (Figure \ref{fig:lpc_formants}).
 
-\subsection{Deep Acoustic Event Classification Engine}
-For non-speech sound detection, $5.0\text{-second}$ audio segments are converted to $(1, 128, 157)$ log-Mel spectrograms. We employ a pretrained \textbf{ResNet-18} backbone \cite{he2016deep}. The first convolutional layer (\texttt{conv1}) is adapted from $3$ RGB channels to $1$ audio channel by averaging weights across the RGB dimension:
-\begin{equation}
-\mathbf{W}_{\text{adapted}} = \frac{1}{3} \sum_{c=1}^{3} \mathbf{W}_{\text{ImageNet}}[:, c, :, :]
-\end{equation}
-This retains low-level spatial edge and texture filters. The classification head consists of $\text{Dropout}(0.4) \to \text{Linear}(512, 128) \to \text{ReLU} \to \text{Dropout}(0.3) \to \text{Linear}(128, 10)$. During training, \textbf{SpecAugment} \cite{park2019specaugment} randomly masks up to $2$ time bands and $2$ frequency bands with $\pm 3\text{ dB}$ gain jitter to prevent overfitting. To eliminate data leakage from ESC-50 source-recording grouping, we use Folds 1--3 ($240$ clips) for training, Fold 4 ($80$ clips) for checkpoint selection, and Fold 5 ($80$ clips) strictly for final held-out testing.
+\begin{figure*}[!ht]
+\centering
+\includegraphics[width=0.90\textwidth]{Figures/fig5_lpc_spectral_envelope_formants_parcor.png}
+\caption{Order-16 LPC Analysis: (A) Smooth vocal-tract envelope matching raw FFT formant peaks ($569\text{ Hz}, 1085\text{ Hz}, 2492\text{ Hz}$); (B) Stable PARCOR coefficients inside $(-1, 1)$.}
+\label{fig:lpc_formants}
+\end{figure*}
 
-\subsection{Speech-to-Text \& Dual-Stream Timeline Fusion}
-The audio stream is segmented using Silero Voice Activity Detection (VAD) \cite{silero2021vad}. Speech intervals are dispatched to the Groq Whisper Large v3 turbo API, producing timestamped dialogue text. Ambient gaps and background segments are classified by the ResNet-18 acoustic model. The Timeline Fusion engine chronologically merges the two streams into formatted subtitle files:
-\begin{quote}
-\texttt{00:00:01,200 --> 00:00:03,800 [Door Wood Knock]}\\
-\texttt{00:00:04,100 --> 00:00:07,500 Good morning, thank you for coming.}\\
-\texttt{00:00:07,600 --> 00:00:09,800 [Applause] [Laughter]}
-\end{quote}
+To check whether an audio clip comes from a real human speaker or an AI voice generator, our forensic module measures four acoustic clues across active speech:
+\begin{itemize}
+    \item \textbf{Micro-Pitch Jitter:} Tiny natural pitch variations between vocal-fold cycles (overly flat pitch suggests synthetic speech).
+    \item \textbf{Amplitude Shimmer:} Cycle-to-cycle loudness variation measured across $10\text{ ms}$ windows.
+    \item \textbf{LPC Glottal Residual:} How sharp or flat the remaining signal looks after removing the vocal-tract filter.
+    \item \textbf{High-Frequency Roll-off:} Sharp energy drop-offs above $7\text{ kHz}$ often left behind by neural vocoders.
+\end{itemize}
+Together, these produce an intuitive Authenticity Score ($0\text{--}100\%$) labeled as \textit{Authentic Human Voice}, \textit{Borderline}, or \textit{Likely AI-Generated}.
+
+\subsection{Speaker Diarization, One-Word Emphasis \& Question Detection}
+Whisper returns text along with word timestamps, which SonicCaption splits into clean single sentences. To tell speakers apart reliably without being fooled when one person raises their voice, our diarizer combines two cues per sentence:
+\begin{itemize}
+    \item \textbf{Vocal Timbre:} Normalized spectral shape (12 DCT bands over active speech frames), which reflects a speaker's physical throat and mouth shape.
+    \item \textbf{Pitch ($F_0$):} Median vocal pitch tracked via autocorrelation with an octave-error guard so pitch jumps do not flip \texttt{Speaker 1} into \texttt{Speaker 2}.
+\end{itemize}
+In live microphone streaming, incoming speech chunks are matched continuously across up to $4$ speakers using semitone pitch clustering.
+
+Every spoken sentence also receives two delivery annotations: a single-word emphasis tag (\texttt{Urgent}, \texttt{Emphatic}, \texttt{Assertive}, \texttt{Hesitant}, \texttt{Soft}, or \texttt{Neutral}) based on relative loudness, pitch spread, and speaking speed, plus a clear \textbf{Question} badge whenever the speaker's pitch rises toward the end of the phrase ($\Delta F_0 \ge +10\text{ Hz}$) or ends with a question mark.
+
+\subsection{Voice Query Search (DTW) \& Sequence Smoothing (HMM)}
+Users can speak or upload a short word to find matching sounds anywhere inside a long recording using Dynamic Time Warping (DTW) \cite{sakoe1978dynamic}. After trimming silence and normalizing MFCC features, DTW slides multi-length windows across the meeting audio to highlight the closest acoustic matches even if Whisper spelled a name differently (Figure \ref{fig:dtw_viterbi}A).
+
+SonicCaption also includes a Discrete Hidden Markov Model (HMM) engine using the Forward and Viterbi algorithms \cite{rabiner1989tutorial} (Figure \ref{fig:dtw_viterbi}B). Beyond classic classroom examples (weather and coin tosses), two built-in HMMs run on real meeting clips to smooth one-second labels for overall scene state (\textit{Ambient}, \textit{Speech}, \textit{SoundEvent}) and speaking flow (\textit{TurnPause}, \textit{Explanation}, \textit{KeyEmphasis}, \textit{QuestionPrompt}).
+
+\begin{figure*}[!ht]
+\centering
+\begin{tabular}{@{}cc@{}}
+\includegraphics[width=0.47\textwidth]{Figures/fig7_dtw_cost_matrix_warp_path_alignment.png} &
+\includegraphics[width=0.47\textwidth]{Figures/fig_viterbi_trellis.png}
+\end{tabular}
+\caption{Sequence Modeling: (A) DTW cost matrix aligning feature frames at different speeds; (B) Viterbi trellis tracing the most likely hidden state sequence.}
+\label{fig:dtw_viterbi}
+\end{figure*}
+
+\subsection{Workplace Sound Classification \& Timeline Fusion}
+To recognize room events in parallel with speech, $5\text{-second}$ windows are converted into $128$-band log-Mel spectrograms and classified by an adapted \textbf{ResNet-18} network \cite{he2016deep} whose input layer averages ImageNet RGB weights down to $1$ audio channel. We train across $10$ workplace-relevant ESC-50 classes (\texttt{clapping}, \texttt{coughing}, \texttt{dog}, \texttt{door\_wood\_knock}, \texttt{footsteps}, \texttt{glass\_breaking}, \texttt{laughing}, \texttt{rain}, \texttt{siren}, \texttt{sneezing}) using SpecAugment time/frequency masking \cite{park2019specaugment}. Folds 1--3 ($240$ clips) are used for training, Fold 4 ($80$ clips) selects the best model, and Fold 5 ($80$ clips) serves strictly as the unseen final test set. An optional compact 4-block CNN backup model is also supported.
+
+Because ESC-50 does not contain clean human speech, raw sound models can mistake voices or fan noise for laughter or rain. SonicCaption prevents these false alerts using two safeguards: ambient room-floor energy gating and Silero VAD \cite{silero2021vad} overlap masking, which drops sound tags that happen directly underneath active speaking. Surviving events are translated into clear workplace alerts (such as \textit{Colleagues laughing}, \textit{Door knock or hand tapping desk}, or \textit{Loud bang / impact}) and merged cleanly into the timeline.
+
+\subsection{Corporate Action Items, Live Scenario \& Web Application}
+In the final stage, speaker turns and room cues are sent to a Groq LLM assistant (compactly formatted so payloads stay small and fast) with a deterministic rule-based offline fallback using word-boundary keywords and commitment patterns. This generates:
+\begin{itemize}
+    \item \textbf{Action Items Table:} Every promise (e.g., Speaker 3 saying \textit{``I will update GitHub tomorrow at 4 PM''}) becomes a structured row listing \textit{Owner}, \textit{Deliverable}, \textit{Deadline}, and \textit{Timestamp}.
+    \item \textbf{Overarching Meeting Scenario:} Continuously identifies the type and mood of the discussion (e.g., \textit{Engineering Sprint Standup}, \textit{Executive Briefing}, or \textit{Structured Q\&A}).
+\end{itemize}
+The system is served through a React 19 + FastAPI + SQLite web app with WaveSurfer.js playback across four views: \textbf{Meeting Studio} (upload/record, scenario, tasks, captions, DTW spotter, HMM flows, signal charts, and \texttt{.srt/.vtt/.json/.csv/.txt} exports), \textbf{Live Meeting Radar} (real-time 3s mic monitoring + 1-click sample demo), \textbf{AI Voice Authenticator}, and \textbf{Voice Copilot} (ask questions about saved meetings).
 
 % =========================================================================
 % SECTION 5: RESULTS & DISCUSSIONS
 % =========================================================================
 \section{Results \& Discussions}
 
-The acoustic classifier was trained for $30$ epochs on Folds 1--3 ($240$ clips) using the AdamW optimizer ($\text{lr}=10^{-4}$ for backbone, $10^{-3}$ for classifier) with Cosine Annealing decay and label smoothing ($\epsilon=0.1$), while using Fold 4 ($80$ clips) strictly for checkpoint selection.
-
-\subsection{Training Convergence \& Confusion Matrix}
-Figure \ref{fig:training_results} illustrates the training dynamics and final normalized confusion matrix on the strictly unseen held-out test fold (Fold 5, $80$ clips across all $10$ balanced classes). Fold 4 validation accuracy rose from $37.5\%$ at Epoch 1 to a \textbf{peak validation accuracy of $88.75\%$} at Epoch 11, stabilizing at a final validation loss of $0.848$ at Epoch 30. Evaluated strictly once on unseen Fold 5, the selected checkpoint achieved \textbf{$80.00\%$ held-out test accuracy}.
+\subsection{Sound Classifier Performance on Unseen Data}
+Trained for $30$ epochs using AdamW, Cosine Annealing, and label smoothing, Fold 4 validation accuracy improved from $37.5\%$ in Epoch 1 to \textbf{$88.75\%$ peak accuracy} at Epoch 11 (final validation loss $0.848$). Evaluated once on strictly unseen Fold 5 ($80$ clips across $10$ balanced classes), ResNet-18 achieved \textbf{$80.00\%$ test accuracy} and a \textbf{$0.787$ macro-$F_1$ score} (Figure \ref{fig:training_results} and Table \ref{tab:metrics}).
 
 \begin{figure*}[!ht]
 \centering
 \includegraphics[width=0.88\textwidth]{Figures/fig3_training_curves_and_confusion_matrix.png}
-\caption{Model Evaluation Dashboard: (A) Cross-entropy loss curves, (B) Training and Fold 4 validation accuracy curves, (C) Cosine annealing learning rate schedule, and (D) Normalized 10-class confusion matrix on strictly held-out Fold 5.}
+\caption{ResNet-18 Training Results: (A) Loss curves, (B) Train vs.\ Fold 4 accuracy, (C) Learning-rate schedule, and (D) Held-out Fold 5 confusion matrix.}
 \label{fig:training_results}
 \end{figure*}
 
-\subsection{Quantitative Performance Metrics}
-Table \ref{tab:metrics} details the per-class performance on strictly held-out Fold 5 ($8$ unseen clips per class). Across all $10$ classes (now properly trained with ESC-50's \texttt{laughing} class), the model achieved \textbf{$80.00\%$ overall test accuracy} and a \textbf{Macro-Averaged $F_1$-score of $0.787$}.
-
 \begin{table}[!ht]
 \centering
-\caption{Detailed Performance Metrics on Strictly Held-out Test Fold 5 ($80$ Unseen Clips)}
+\caption{Per-Class ResNet-18 Metrics on Strictly Unseen ESC-50 Fold 5 ($80$ Clips)}
 \vspace{4pt}
 \scalebox{0.85}{
 \begin{tabular}{@{}lcccc@{}}
 \toprule
-\textbf{Acoustic Class} & \textbf{Precision} & \textbf{Recall} & \textbf{\boldmath$F_1$-Score} & \textbf{Support} \\ \midrule
+\textbf{Sound Class} & \textbf{Precision} & \textbf{Recall} & \textbf{\boldmath$F_1$-Score} & \textbf{Clips} \\ \midrule
 \texttt{clapping} & $0.78$ & $0.88$ & $0.82$ & $8$ \\
 \texttt{coughing} & $0.86$ & $0.75$ & $0.80$ & $8$ \\
 \texttt{dog} & $0.62$ & $0.62$ & $0.62$ & $8$ \\
@@ -222,26 +245,47 @@ Table \ref{tab:metrics} details the per-class performance on strictly held-out F
 \texttt{rain} & $0.89$ & $\mathbf{1.00}$ & $0.94$ & $8$ \\
 \texttt{siren} & $\mathbf{1.00}$ & $\mathbf{1.00}$ & $\mathbf{1.00}$ & $8$ \\
 \texttt{sneezing} & $\mathbf{1.00}$ & $0.25$ & $0.40$ & $8$ \\ \midrule
-\textbf{Overall Test Accuracy} & \multicolumn{3}{c}{\textbf{80.00\%}} & \textbf{80} \\
+\textbf{Overall Accuracy} & \multicolumn{3}{c}{\textbf{80.00\%}} & \textbf{80} \\
 \textbf{Macro Average} & $\mathbf{0.84}$ & $\mathbf{0.80}$ & $\mathbf{0.787}$ & \textbf{80} \\ \bottomrule
 \end{tabular}
 }
 \label{tab:metrics}
 \end{table}
 
-\subsection{Physical Acoustic Analysis of Results}
+\subsection{Key Acoustic Findings}
 \begin{enumerate}
-    \item \textbf{Continuous Stationary Sounds (\texttt{siren}, \texttt{rain}):} Achieved the highest separability, with \texttt{siren} reaching $1.00$ across precision, recall, and $F_1$, and \texttt{rain} reaching $1.00$ recall ($F_1 = 0.94$). Rain exhibits stationary broadband high-frequency diffusion, whereas sirens present sustained periodic frequency-modulated harmonic contours.
-    \item \textbf{High-Energy Transient Impacts (\texttt{door\_wood\_knock}, \texttt{footsteps}, \texttt{glass\_breaking}, \texttt{clapping}):} Achieved $F_1 \in [0.82, 0.88]$. Sharp amplitude onset rise-times in the 128-band Mel spectrogram allow the network to reliably discriminate wooden knocks, footsteps, applause impulses, and high-frequency glass shattering.
-    \item \textbf{Human Vocalisations \& Biological Overlap (\texttt{laughing}, \texttt{coughing}, \texttt{sneezing}, \texttt{dog}):} Including ESC-50's native \texttt{laughing} category enabled $1.00$ recall ($8/8$ test clips detected, $F_1 = 0.73$). Minor cross-class confusions arise primarily on short unvoiced burst transients—particularly \texttt{sneezing} ($1.00$ precision, $0.25$ recall) overlapping with \texttt{dog} ($0.38$) and \texttt{laughing} ($0.25$)—reflecting shared rapid glottal pressure release acoustics under a compact $24$-clip-per-class training split.
-    \item \textbf{Speech-Overlap Suppression \& Timeline Fusion:} Because ESC-50 excludes clean spoken dialogue, the fusion engine applies Silero VAD masks to suppress acoustic false positives during active speech intervals while preserving confident non-speech cues in chronological subtitles.
+    \item \textbf{Continuous Sounds (\texttt{siren}, \texttt{rain}):} Clear harmonic sirens scored $1.00$ across all metrics, and broadband rain reached $1.00$ recall ($F_1 = 0.94$).
+    \item \textbf{Sharp Room Impacts (\texttt{door\_wood\_knock}, \texttt{footsteps}, \texttt{glass\_breaking}, \texttt{clapping}):} Distinct transient spikes gave strong $F_1$ scores between $0.82$ and $0.88$.
+    \item \textbf{Short Vocal Bursts (\texttt{laughing}, \texttt{coughing}, \texttt{sneezing}, \texttt{dog}):} Including \texttt{laughing} properly enabled $100\%$ recall ($F_1 = 0.73$). Very short bursts like \texttt{sneezing} ($0.25$ recall) occasionally overlapped with \texttt{dog} or \texttt{laughing} due to the small $24$-clip training set per class.
+    \item \textbf{Cleaner Classroom \& Office Captions:} Combining Spectral Subtraction denoising, low-frequency fan attenuation, and VAD speech masking eliminated false \texttt{rain} and \texttt{laughing} pop-ups during normal speech.
 \end{enumerate}
+
+\subsection{End-to-End Verification}
+After integration, automated tests and live API runs confirmed all modules work together cleanly (Table \ref{tab:verification}).
+
+\begin{table*}[!ht]
+\centering
+\caption{Verified System Build, Test Suite, and Live API Checks}
+\vspace{4pt}
+\scalebox{0.84}{
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Check} & \textbf{What Was Tested} & \textbf{Result} \\ \midrule
+Backend Tests & Full test suite across $13$ Python test files & \textbf{99 / 99 passed} ($57.15\text{ s}$) \\
+Frontend Build & TypeScript + Vite production build & Built in $1.66\text{ s}$ ($0$ errors) \\
+Meeting Audio Upload & Batch analyze endpoint on test speech clip & HTTP $200$; Groq scenario + \texttt{Assertive} tag \\
+Live Action Extraction & Live intelligence endpoint on multi-speaker exchange & HTTP $200$; assigned GitHub task to Speaker 3 \\
+Speaker Separation & 3-turn pitch test ($131 \to 195 \to 164.7\text{ Hz}$) & Exact \texttt{Speaker 1, Speaker 2, Speaker 1} \\ \bottomrule
+\end{tabular}
+}
+\label{tab:verification}
+\end{table*}
 
 % =========================================================================
 % SECTION 6: CONCLUSIONS
 % =========================================================================
 \section{Conclusions}
-In this project, we designed and deployed \textbf{SonicCaption}, an intelligent multimodal audio captioning system that bridges classical speech processing and modern deep learning. We developed an end-to-end signal processing engine from first principles---implementing pre-emphasis, Hamming windowing, 40-channel Mel filter-banks, MFCCs with dynamic deltas, Levinson-Durbin LPC vocal tract modeling, and DTW. We demonstrated that transferring ImageNet-pretrained representations from ResNet-18 to 1-channel log-Mel spectrograms with SpecAugment regularization overcomes data scarcity, achieving a peak Fold-4 validation accuracy of $88.75\%$ and an $80.00\%$ test accuracy across all $10$ balanced ESC-50 classes on strictly unseen Fold 5. By fusing acoustic scene events with Groq Whisper ASR into standardized subtitle formats, SonicCaption automates closed-captioning compliance and provides vital accessibility for deaf and hard-of-hearing individuals. Future work will investigate end-to-end joint CTC-attention architectures for simultaneous phoneme and sound event decoding on embedded edge devices.
+\textbf{SonicCaption} grows beyond basic audio captioning into a complete corporate meeting assistant for deaf and hard-of-hearing professionals. By combining clean from-scratch DSP algorithms with ResNet-18 workplace sound sensing ($80.00\%$ unseen Fold-5 accuracy, $0.787$ macro-$F_1$), timbre-and-pitch speaker separation, one-word emphasis tags, rising-pitch question detection, AI voice screening, and automated task and scenario extraction, it delivers full meeting awareness in real time. Future work will explore compact offline speech recognition models so the full system can run locally without cloud APIs.
 
 % =========================================================================
 % REFERENCES

@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
+  Briefcase,
   CheckCircle2,
+  ClipboardCheck,
   FileAudio,
+  HelpCircle,
   Mic,
   Send,
   ShieldAlert,
@@ -16,10 +19,11 @@ import {
 } from 'lucide-react'
 import {
   authenticateVoice,
+  deriveLiveMeetingIntelligence,
   sendAgentTurn,
   sendWatchChunk,
 } from '../api'
-import type { AlertItem } from '../types'
+import type { ActionItem, AlertItem, MeetingScenario } from '../types'
 import { RAW_MIC_CONSTRAINTS, blobToWavFile, startContinuousPcmMonitor } from '../utils/wavEncoder'
 import { WavePlayer } from './WavePlayer'
 
@@ -218,7 +222,12 @@ export function WatchView({ onAlertLogged }: { onAlertLogged: () => void }) {
   const [rmsDb, setRmsDb] = useState(-60)
   const [speechActive, setSpeechActive] = useState(false)
   const [urgent, setUrgent] = useState<AlertItem | null>(null)
-  const [feed, setFeed] = useState<{ ts: string; msg: string; rms: number }[]>([])
+  const [liveQuestion, setLiveQuestion] = useState<string | null>(null)
+  const [liveTurns, setLiveTurns] = useState<any[]>([])
+  const [liveEvents, setLiveEvents] = useState<any[]>([])
+  const [scenario, setScenario] = useState<MeetingScenario | null>(null)
+  const [actionItems, setActionItems] = useState<ActionItem[]>([])
+  const [feed, setFeed] = useState<{ ts: string; kind: 'speech' | 'sound' | 'sys'; speaker?: string; emphasis?: string; isQuestion?: boolean; qReason?: string; msg: string; cue?: string; rms: number }[]>([])
   const [err, setErr] = useState('')
   const stopCaptureRef = useRef<(() => void) | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -226,21 +235,87 @@ export function WatchView({ onAlertLogged }: { onAlertLogged: () => void }) {
   const baselineRef = useRef(baselineRms)
   const calibratingRef = useRef(calibrating)
   const inFlightRef = useRef(false)
+  const turnsRef = useRef<any[]>([])
+  const eventsRef = useRef<any[]>([])
+  const speakerProfilesRef = useRef<{ label: string; f0: number }[]>([])
+  const [demoBusy, setDemoBusy] = useState(false)
   useEffect(() => { denoiseRef.current = denoise }, [denoise])
   useEffect(() => { baselineRef.current = baselineRms }, [baselineRms])
   useEffect(() => { calibratingRef.current = calibrating }, [calibrating])
+
+  function assignLiveSpeaker(rawSpeaker?: string, meanF0?: number): string {
+    if (rawSpeaker && rawSpeaker.trim()) return rawSpeaker
+    const f0 = Number(meanF0 || 0)
+    if (f0 < 45) return speakerProfilesRef.current[0]?.label || 'Speaker 1'
+    const profiles = speakerProfilesRef.current
+    if (profiles.length === 0) {
+      profiles.push({ label: 'Speaker 1', f0 })
+      return 'Speaker 1'
+    }
+    let bestIdx = 0
+    let bestSemi = Infinity
+    profiles.forEach((p, idx) => {
+      const semi = Math.abs(12 * Math.log2(f0 / p.f0))
+      if (semi < bestSemi) {
+        bestSemi = semi
+        bestIdx = idx
+      }
+    })
+    if (bestSemi <= 2.8 || profiles.length >= 4) {
+      profiles[bestIdx].f0 = profiles[bestIdx].f0 * 0.7 + f0 * 0.3
+      return profiles[bestIdx].label
+    }
+    const label = `Speaker ${profiles.length + 1}`
+    profiles.push({ label, f0 })
+    return label
+  }
+
+  async function runCorporateDemo() {
+    setDemoBusy(true)
+    setErr('')
+    try {
+      speakerProfilesRef.current = []
+      const nowStr = new Date().toLocaleTimeString()
+      const demoTurns = [
+        { speaker: 'Speaker 1', start: 0.5, mean_f0_hz: 132.0, emphasis_tag: 'Assertive', is_question: true, question_reason: 'Rising pitch contour (+22 Hz) + Question phrasing', text: 'Is the authentication pull request ready for staging deploy?' },
+        { speaker: 'Speaker 2', start: 4.1, mean_f0_hz: 196.0, emphasis_tag: 'Neutral', is_question: false, text: 'Almost done — waiting on the final schema check.' },
+        { speaker: 'Speaker 3', start: 8.2, mean_f0_hz: 158.0, emphasis_tag: 'Urgent', is_question: false, text: 'I will update GitHub tomorrow at 4 PM with the patch.' },
+        { speaker: 'Speaker 1', start: 12.6, mean_f0_hz: 136.0, emphasis_tag: 'Emphatic', is_question: false, text: 'Awesome, Speaker 2 will share the QA checklist by Friday.' },
+      ]
+      const demoEvents = [
+        { start: 7.5, end: 8.1, label: 'Laughter', confidence: 0.89, workplace_cue: 'Social cue: Room laughter / positive banter' },
+        { start: 11.8, end: 12.4, label: 'Door knock', confidence: 0.91, workplace_cue: 'Entrance / desk knock cue — someone at door or seeking attention' },
+      ]
+      turnsRef.current = demoTurns
+      eventsRef.current = demoEvents
+      setLiveTurns(demoTurns)
+      setLiveEvents(demoEvents)
+      setLiveQuestion('Speaker 1: "Is the authentication pull request ready for staging deploy?" (Rising pitch contour (+22 Hz) + Question phrasing)')
+      setFeed([
+        ...demoEvents.map((e) => ({ ts: nowStr, kind: 'sound' as const, msg: `${e.label} (${Math.round(e.confidence * 100)}%)`, cue: e.workplace_cue, rms: -26.0 })),
+        ...demoTurns.map((s) => ({ ts: nowStr, kind: 'speech' as const, speaker: s.speaker, emphasis: s.emphasis_tag, isQuestion: s.is_question, qReason: s.question_reason, msg: s.text, rms: -22.5 })),
+      ].reverse())
+      const intel = await deriveLiveMeetingIntelligence(demoTurns, demoEvents)
+      if (intel.meeting_scenario) setScenario(intel.meeting_scenario)
+      if (intel.action_items) setActionItems(intel.action_items)
+    } catch (e: any) {
+      setErr(e.message || 'Demo run failed')
+    } finally {
+      setDemoBusy(false)
+    }
+  }
 
   async function handleChunk(wav: File) {
     if (inFlightRef.current) return
     inFlightRef.current = true
     try {
-      const res = await sendWatchChunk(wav, denoiseRef.current, baselineRef.current)
+      const res = await sendWatchChunk(wav, denoiseRef.current, baselineRef.current, 'resnet', true)
       setRmsDb(res.rms_db)
       if (calibratingRef.current && res.noise_rms != null) {
         setBaselineRms(res.noise_rms)
         setCalibrating(false)
         setSpeechActive(false)
-        setFeed((prev) => [{ ts: new Date().toLocaleTimeString(), msg: `Calibrated room floor (${res.rms_db.toFixed(1)} dB)`, rms: res.rms_db }, ...prev].slice(0, 15))
+        setFeed((prev) => [{ ts: new Date().toLocaleTimeString(), kind: 'sys' as const, msg: `Calibrated conference room floor (${res.rms_db.toFixed(1)} dB)`, rms: res.rms_db }, ...prev].slice(0, 20))
         return
       }
       setSpeechActive(Boolean(res.has_speech))
@@ -248,12 +323,63 @@ export function WatchView({ onAlertLogged }: { onAlertLogged: () => void }) {
         setUrgent(res.urgent_alert)
         onAlertLogged()
       }
-      const tagText = res.events?.length
-        ? res.events.map((e: any) => `${e.label} (${Math.round(e.confidence * 100)}%)`).join(', ')
-        : res.has_speech ? 'Speech active (Silero VAD)' : 'Quiet / stationary ambient floor'
-      setFeed((prev) => [{ ts: new Date().toLocaleTimeString(), msg: tagText, rms: res.rms_db }, ...prev].slice(0, 15))
+
+      const newItems: typeof feed = []
+      const nowStr = new Date().toLocaleTimeString()
+
+      const speechChunks: any[] = res.speech_chunks || []
+      if (speechChunks.length > 0) {
+        const mapped = speechChunks.map((s) => ({
+          ...s,
+          speaker: assignLiveSpeaker(s.speaker, s.mean_f0_hz),
+        }))
+        turnsRef.current = [...turnsRef.current, ...mapped].slice(-30)
+        setLiveTurns(turnsRef.current)
+        mapped.forEach((s) => {
+          if (s.is_question) {
+            setLiveQuestion(`${s.speaker}: "${s.text}" (${s.question_reason || 'Question'})`)
+          }
+          newItems.push({
+            ts: nowStr,
+            kind: 'speech',
+            speaker: s.speaker,
+            emphasis: s.emphasis_tag || 'Neutral',
+            isQuestion: Boolean(s.is_question),
+            qReason: s.question_reason,
+            msg: s.text,
+            rms: res.rms_db,
+          })
+        })
+      }
+
+      if (res.events?.length) {
+        eventsRef.current = [...eventsRef.current, ...res.events].slice(-20)
+        setLiveEvents(eventsRef.current)
+        res.events.forEach((e: any) => {
+          newItems.push({
+            ts: nowStr,
+            kind: 'sound',
+            msg: `${e.label} (${Math.round(e.confidence * 100)}%)`,
+            cue: e.workplace_cue,
+            rms: res.rms_db,
+          })
+        })
+      }
+
+      if (newItems.length > 0) {
+        setFeed((prev) => [...newItems.reverse(), ...prev].slice(0, 25))
+        // Continuously refresh overarching meeting scenario & action commitments
+        deriveLiveMeetingIntelligence(turnsRef.current, eventsRef.current)
+          .then((intel) => {
+            if (intel.meeting_scenario) setScenario(intel.meeting_scenario)
+            if (intel.action_items) setActionItems(intel.action_items)
+          })
+          .catch(() => { })
+      } else if (res.has_speech) {
+        setFeed((prev) => [{ ts: nowStr, kind: 'sys' as const, msg: 'Voice activity detected — buffering phrase...', rms: res.rms_db }, ...prev].slice(0, 25))
+      }
     } catch (e: any) {
-      setErr(e.message || 'Watch chunk failed')
+      setErr(e.message || 'Live chunk failed')
     } finally {
       inFlightRef.current = false
     }
@@ -275,9 +401,9 @@ export function WatchView({ onAlertLogged }: { onAlertLogged: () => void }) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: RAW_MIC_CONSTRAINTS })
       streamRef.current = stream
       setWatching(true)
-      stopCaptureRef.current = startContinuousPcmMonitor(stream, 2500, handleChunk)
+      stopCaptureRef.current = startContinuousPcmMonitor(stream, 3000, handleChunk)
     } catch {
-      setErr('Microphone permission required for Live Monitor.')
+      setErr('Microphone permission required for Live Meeting Radar.')
     }
   }
 
@@ -294,47 +420,124 @@ export function WatchView({ onAlertLogged }: { onAlertLogged: () => void }) {
       {urgent && (
         <div className="urgent-bar">
           <ShieldAlert size={18} />
-          <span>ALERT: {urgent.event_label} ({Math.round(urgent.confidence * 100)}%) — {urgent.snippet_text}</span>
+          <span>ROOM ALERT: {urgent.event_label} ({Math.round(urgent.confidence * 100)}%) — {urgent.snippet_text}</span>
           <button className="secondary-btn" style={{ marginLeft: 'auto' }} onClick={() => setUrgent(null)}>Acknowledge</button>
         </div>
       )}
+
+      {liveQuestion && (
+        <div className="notice-bar" style={{ display: 'flex', alignItems: 'center', gap: 10, borderColor: 'rgba(6, 182, 212, 0.5)', background: 'rgba(6, 182, 212, 0.12)', color: '#cffafe' }}>
+          <HelpCircle size={18} color="#22d3ee" />
+          <span><b>QUESTION ASKED IN ROOM:</b> {liveQuestion}</span>
+          <button className="secondary-btn" style={{ marginLeft: 'auto', padding: '4px 10px' }} onClick={() => setLiveQuestion(null)}>Dismiss</button>
+        </div>
+      )}
+
+      <div className="panel" style={{ borderColor: 'rgba(6, 182, 212, 0.35)', background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.08), rgba(18, 21, 34, 0.95))' }}>
+        <div className="row-between">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Briefcase size={20} color="#06b6d4" />
+            <div>
+              <small className="muted" style={{ textTransform: 'uppercase', letterSpacing: '0.07em', fontSize: 10 }}>Live Overarching Corporate Meeting Scenario</small>
+              <h2 style={{ margin: 0, fontSize: 17 }}>{scenario ? scenario.scenario_label : 'Standby — Listening for Corporate Meeting Audio'}</h2>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <span className="tag ok">{scenario ? scenario.meeting_mood : 'Ready to Monitor'}</span>
+            <span className="tag mono">{liveTurns.length} Remarks · {liveEvents.length} Room Cues</span>
+          </div>
+        </div>
+        {scenario && scenario.active_cues?.length > 0 && (
+          <div className="tag-row" style={{ marginTop: 10 }}>
+            {scenario.active_cues.map((c, idx) => (
+              <span key={idx} className="sound-chip">{c}</span>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="panel">
         <div className="panel-header">
           <div>
-            <h3>Live Room Acoustic HUD</h3>
-            <p className="muted" style={{ margin: '3px 0 0' }}>Real-time streaming PCM chunks through smoothed Spectral Subtraction, calibrated ambient noise gate, Silero VAD, and Sound CNN.</p>
+            <h3>Live Corporate Meeting Radar — Workplace Accessibility HUD</h3>
+            <p className="muted" style={{ margin: '3px 0 0' }}>
+              Real-time speech transcription with one-word emphasis tags, vocal question inflection flags, action-item capture, and workplace room sound cues.
+            </p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <label className="toggle-chip">
               <input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} />
               Denoise Stream
             </label>
+            <button className="secondary-btn" onClick={runCorporateDemo} disabled={demoBusy}>
+              {demoBusy ? 'Running Demo...' : 'Test Sample Meeting'}
+            </button>
             {watching && (
               <button className="secondary-btn" onClick={() => setCalibrating(true)} disabled={calibrating}>
-                {calibrating ? 'Sampling Room...' : 'Calibrate Fan Floor'}
+                {calibrating ? 'Sampling Room...' : 'Calibrate Room Floor'}
               </button>
             )}
             <button className={watching ? 'danger-btn' : 'primary-btn'} onClick={toggleWatch}>
               {watching ? <Square size={14} /> : <Mic size={14} />}
-              {watching ? 'Stop Monitor' : 'Start Monitor'}
+              {watching ? 'Stop Meeting Radar' : 'Start Meeting Radar'}
             </button>
           </div>
         </div>
         {err && <div className="notice-bar">{err}</div>}
         <div>
           <div className="row-between" style={{ fontSize: 12 }}>
-            <span>Level: <b className="mono" style={{ color: '#06b6d4' }}>{rmsDb.toFixed(1)} dB</b> · Noise Floor: <b className="mono">{floorDb}</b></span>
-            <span>VAD: <b style={{ color: speechActive ? '#10b981' : '#64748b' }}>{speechActive ? 'Speech Active' : 'Idle'}</b></span>
+            <span>Room Level: <b className="mono" style={{ color: '#06b6d4' }}>{rmsDb.toFixed(1)} dB</b> · Floor: <b className="mono">{floorDb}</b></span>
+            <span>Speech Sensor: <b style={{ color: speechActive ? '#10b981' : '#64748b' }}>{speechActive ? 'Speaking Active' : 'Listening'}</b></span>
           </div>
           <div className="meter-bar"><div className="meter-fill" style={{ width: `${pct}%` }} /></div>
         </div>
-        <h4 style={{ margin: '18px 0 10px', fontSize: 13 }}>Live Event Stream</h4>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <h3><ClipboardCheck size={16} style={{ verticalAlign: 'middle', marginRight: 7, color: '#10b981' }} />Live Spoken Action Items ({actionItems.length})</h3>
+            <p className="muted" style={{ margin: '2px 0 0' }}>Automatically maps spoken commitments to Speaker, Deliverable, and Deadline in real time.</p>
+          </div>
+        </div>
+        {actionItems.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>
+            No commitments captured yet. Start the radar and say e.g. &ldquo;I will update GitHub tomorrow by 4 PM&rdquo;, or click &ldquo;Test Sample Meeting&rdquo;.
+          </p>
+        ) : (
+          <table className="data-table">
+            <thead><tr><th>Owner</th><th>Assigned Deliverable</th><th>Deadline</th><th>Priority</th></tr></thead>
+            <tbody>
+              {actionItems.map((a, idx) => (
+                <tr key={idx}>
+                  <td><span className="tag ok">{a.owner}</span></td>
+                  <td><b>{a.task}</b></td>
+                  <td><span className="sound-chip">{a.deadline}</span></td>
+                  <td className="mono">{a.priority}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-header"><h3>Real-Time Workplace Transcript &amp; Room Cues</h3></div>
         {feed.length === 0 ? (
-          <p className="muted">Start the monitor and click &ldquo;Calibrate Fan Floor&rdquo; in a noisy classroom, then test speech, clapping, knocking, or laughter.</p>
+          <p className="muted">Click &ldquo;Start Meeting Radar&rdquo; (and &ldquo;Calibrate Room Floor&rdquo; in a loud office), then capture live conversation, questions, commitments, laughter, or door knocks.</p>
         ) : (
           feed.map((f, i) => (
-            <div key={i} className="list-card">
-              <div><b>{f.msg}</b><div className="muted mono">{f.ts}</div></div>
+            <div key={i} className="list-card" style={{ borderLeft: f.kind === 'speech' ? '3px solid #06b6d4' : f.kind === 'sound' ? '3px solid #f59e0b' : '1px solid var(--border)' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                  {f.speaker && <span className="tag ok">{f.speaker}</span>}
+                  {f.emphasis && <span className="tag" style={{ borderColor: 'rgba(168,85,247,0.4)', color: '#d8b4fe' }}>{f.emphasis}</span>}
+                  {f.isQuestion && <span className="sound-chip">? QUESTION · {f.qReason}</span>}
+                  <b>{f.msg}</b>
+                </div>
+                {f.cue && <div className="muted" style={{ marginTop: 3 }}>{f.cue}</div>}
+                <div className="muted mono" style={{ marginTop: 2 }}>{f.ts}</div>
+              </div>
               <span className="tag mono">{f.rms.toFixed(1)} dB</span>
             </div>
           ))

@@ -56,3 +56,50 @@ def test_agent_offline_insight_and_voice_turn(monkeypatch):
     )
     assert "door knock" in turn["reply"].lower()
     assert any("email huda" in r["title"].lower() for r in turn["new_reminders"])
+
+
+def test_corporate_meeting_actions_and_scenario(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    turns = [
+        {"start": 0.5, "end": 3.0, "speaker": "Speaker 1", "emphasis_tag": "Assertive", "is_question": True, "text": "Is the staging branch ready for release?"},
+        {"start": 3.5, "end": 7.2, "speaker": "Speaker 3", "emphasis_tag": "Emphatic", "is_question": False, "text": "I will update GitHub tomorrow at 3 PM."},
+        {"start": 8.0, "end": 11.0, "speaker": "Speaker 2", "emphasis_tag": "Urgent", "is_question": False, "text": "Speaker 1 will fix the API blocker today by 5:00 PM."},
+    ]
+    evs = [
+        {"start": 7.4, "end": 8.0, "label": "Laughter", "confidence": 0.88},
+        {"start": 11.2, "end": 12.0, "label": "Door knock", "confidence": 0.90},
+    ]
+    res = agent_service.extract_session_insights(turns, evs, pitch_stats={"mean_f0_hz": 152.0})
+    actions = res["action_items"]
+    assert len(actions) == 2
+    assert actions[0]["owner"] == "Speaker 3"
+    assert "Update GitHub" in actions[0]["task"]
+    assert "Tomorrow" in actions[0]["deadline"]
+    assert actions[1]["owner"] == "Speaker 1"
+    assert "5:00 PM" in actions[1]["deadline"]
+
+    scen = res["meeting_scenario"]
+    assert "Engineering" in scen["scenario_label"] or "Sprint" in scen["scenario_label"]
+    assert scen["speaker_count"] == 3
+    assert scen["question_count"] == 1
+    assert scen["action_count"] == 2
+    assert "Lighthearted" in scen["meeting_mood"] or any("laughter" in c.lower() for c in scen["active_cues"])
+
+
+def test_scenario_avoids_substring_false_positives(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    turns = [
+        {
+            "start": 0.0,
+            "end": 5.0,
+            "speaker": "Speaker 1",
+            "emphasis_tag": "Neutral",
+            "is_question": False,
+            "text": "The steamer plied up and down the lock and incidentally carried cargo probably on schedule.",
+        }
+    ]
+    res = agent_service.extract_session_insights(turns, [], pitch_stats={"mean_f0_hz": 95.0})
+    label = res["meeting_scenario"]["scenario_label"]
+    assert "Incident" not in label
+    assert "Engineering" not in label
+    assert "Briefing" in label or "Narrative" in label

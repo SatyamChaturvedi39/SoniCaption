@@ -143,7 +143,7 @@ def spectral_subtraction_denoise(
 
 
 def _frame_f0_autocorr(frame: np.ndarray, sr: int, lag_min: int, lag_max: int) -> float:
-    """Estimate single-frame fundamental frequency (Hz) via normalized autocorrelation."""
+    """Estimate single-frame fundamental frequency (Hz) via normalized autocorrelation with subharmonic octave guard."""
     centered = frame - np.mean(frame)
     energy = float(np.dot(centered, centered))
     if energy <= 1e-9 or len(centered) <= lag_max:
@@ -153,15 +153,26 @@ def _frame_f0_autocorr(frame: np.ndarray, sr: int, lag_min: int, lag_max: int) -
     corr = np.correlate(centered, centered, mode="full")[len(centered) - 1 :]
     best_lag = -1
     best_norm = 0.0
+    norms = np.zeros(min(lag_max + 2, len(corr)), dtype=np.float32)
     for lag in range(lag_min, min(lag_max + 1, len(corr))):
         denom = float(np.sqrt(np.sum(centered[:-lag] ** 2) * np.sum(centered[lag:] ** 2))) + 1e-12
         norm_r = float(corr[lag]) / denom
+        norms[lag] = norm_r
         if norm_r > best_norm:
             best_norm = norm_r
             best_lag = lag
 
     if best_norm < 0.35 or best_lag <= 0:
         return 0.0
+
+    # Octave-doubling protection: prefer fundamental lag near 2 * best_lag if correlation is comparable
+    sub_center = best_lag * 2
+    if sub_center - 2 >= lag_min and sub_center + 2 <= lag_max and sub_center + 2 < len(norms):
+        window = norms[sub_center - 2 : sub_center + 3]
+        sub_offset = int(np.argmax(window)) - 2
+        if float(window[sub_offset + 2]) >= 0.78 * best_norm:
+            best_lag = sub_center + sub_offset
+
     return float(sr) / float(best_lag)
 
 
@@ -213,38 +224,110 @@ def estimate_pitch_contour(
     }
 
 
+def split_sentences_with_words(speech_segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Split multi-sentence Whisper segments into clean individual sentence turns using
+    word timestamps when available, and snap segment bounds to actual spoken words.
+    """
+    if not speech_segments:
+        return []
+    out: List[Dict[str, Any]] = []
+    for seg in speech_segments:
+        words = seg.get("words") or []
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        if len(words) < 2:
+            out.append(seg)
+            continue
+
+        cur_words: List[Dict[str, Any]] = []
+        for w in words:
+            w_txt = str(w.get("word", "")).strip()
+            if not w_txt:
+                continue
+            cur_words.append(w)
+            if w_txt[-1] in ".?!" and len(cur_words) >= 2:
+                st = round(float(cur_words[0].get("start", seg["start"])), 3)
+                en = round(float(cur_words[-1].get("end", seg["end"])), 3)
+                sent = " ".join(str(x.get("word", "")).strip() for x in cur_words).strip()
+                if en > st and sent:
+                    out.append({**seg, "start": st, "end": en, "text": sent, "words": list(cur_words)})
+                cur_words = []
+
+        if cur_words:
+            st = round(float(cur_words[0].get("start", seg["start"])), 3)
+            en = round(float(cur_words[-1].get("end", seg["end"])), 3)
+            sent = " ".join(str(x.get("word", "")).strip() for x in cur_words).strip()
+            if en > st and sent:
+                out.append({**seg, "start": st, "end": en, "text": sent, "words": list(cur_words)})
+    return out if out else speech_segments
+
+
 def _segment_active_timbre_and_pitch(
     chunk: np.ndarray,
     sr: int,
 ) -> tuple[np.ndarray, float, bool]:
-    """Extract un-normalized DCT spectral shape (speaker vocal tract timbre) + median voiced pitch from active frames."""
+    """Extract L2-normalized DCT vocal-tract timbre + median voiced pitch from core active speech frames."""
     frames, _ = frame_signal(chunk, frame_length=400, hop_length=160, window_type="hamming")
     if len(frames) == 0:
         return np.zeros(12, dtype=np.float32), 0.0, False
 
     rms_f = compute_rms(frames)
     peak_rms = float(np.max(rms_f)) if len(rms_f) else 0.0
-    active_mask = rms_f >= max(0.0025, 0.22 * peak_rms)
+    active_mask = rms_f >= max(0.0025, 0.28 * peak_rms)
     active_frames = frames[active_mask]
     if len(active_frames) < 2:
         active_frames = frames
 
-    # Reconstruct active-only samples for clean spectral/pitch analysis without pause dilution
     active_sig = active_frames.reshape(-1)
     _, _, mel = compute_mel_spectrogram(active_sig, sr=sr, n_mels=20, n_fft=512, hop_length=160, frame_length=400)
-    mel_mean = np.mean(mel, axis=1)  # (20,) preserving formant spectral shape
+    mel_mean = np.mean(mel, axis=1)
 
-    # DCT-II coefficients c1..c12 (dropping c0 overall loudness so speaker volume doesn't masquerade as a different voice)
     M = len(mel_mean)
     timbre = np.zeros(12, dtype=np.float32)
     m_idx = np.arange(M)
     for k in range(1, 13):
         timbre[k - 1] = float(np.dot(np.cos(np.pi * k * (m_idx + 0.5) / float(M)), mel_mean)) * np.sqrt(2.0 / float(M))
 
+    # L2-normalize vocal-tract spectral vector so volume changes do not shift speaker identity
+    t_norm = float(np.linalg.norm(timbre))
+    if t_norm > 1e-6:
+        timbre = (timbre / t_norm).astype(np.float32)
+
     pitch = estimate_pitch_contour(active_sig, sr=sr)
     voiced_f0 = [f for f in pitch.get("f0_hz", []) if f > 60.0]
     med_f0 = float(np.median(voiced_f0)) if voiced_f0 else 0.0
     return timbre, med_f0, med_f0 > 60.0
+
+
+def _kmeans_farthest_init(feat_mat: np.ndarray, k: int, max_iter: int = 40) -> np.ndarray:
+    """Deterministic K-Means using farthest-point initialization so extreme voices anchor speakers."""
+    n = feat_mat.shape[0]
+    if n <= k:
+        return np.arange(n, dtype=np.int32)
+
+    # Pick initial pair maximizing pairwise squared distance
+    d_mat = np.sum((feat_mat[:, None, :] - feat_mat[None, :, :]) ** 2, axis=2)
+    i0, i1 = np.unravel_index(int(np.argmax(d_mat)), d_mat.shape)
+    chosen = [int(i0), int(i1)]
+    while len(chosen) < k:
+        min_d = np.min(d_mat[:, chosen], axis=1)
+        chosen.append(int(np.argmax(min_d)))
+    centroids = feat_mat[chosen].copy()
+
+    labels = np.zeros(n, dtype=np.int32)
+    for _ in range(max_iter):
+        dists = np.sum((feat_mat[:, None, :] - centroids[None, :, :]) ** 2, axis=2)
+        new_labels = np.argmin(dists, axis=1).astype(np.int32)
+        if np.array_equal(new_labels, labels) and _ > 0:
+            break
+        labels = new_labels
+        for c in range(k):
+            mem = feat_mat[labels == c]
+            if len(mem) > 0:
+                centroids[c] = np.mean(mem, axis=0)
+    return labels
 
 
 def diarize_speakers(
@@ -255,7 +338,7 @@ def diarize_speakers(
 ) -> List[Dict[str, Any]]:
     """
     Assign speaker labels ('Speaker 1', 'Speaker 2', ...) to speech segments using
-    active-frame DCT/MFCC vocal-tract timbre + semitone F0 clustered via K-Means VQ.
+    active-frame L2 vocal-tract timbre + semitone F0 with deterministic farthest-point VQ.
     """
     if not speech_segments:
         return []
@@ -283,7 +366,6 @@ def diarize_speakers(
     if len(timbres) < 2:
         return [{**seg, "speaker": "Speaker 1"} for seg in speech_segments]
 
-    # Impute missing pitch on ultra-short unvoiced bursts with clip median so missing F0 doesn't create phantom outliers
     valid_f0s = [f for f, ok in zip(f0s, has_pitch) if ok]
     fallback_f0 = float(np.median(valid_f0s)) if valid_f0s else 140.0
     semitones = np.array(
@@ -291,13 +373,11 @@ def diarize_speakers(
         dtype=np.float32,
     )
 
+    # Balanced embedding: L2-normalized vocal-tract shape (4.0x weight) + semitone pitch (1/3.6 weight)
+    # so emphatic pitch inflection by Speaker 1 does not override vocal-tract identity.
     timbre_mat = np.vstack(timbres)
-    t_std = np.std(timbre_mat, axis=0, keepdims=True)
-    timbre_z = (timbre_mat - np.mean(timbre_mat, axis=0, keepdims=True)) / np.maximum(t_std, 1e-4)
-
-    # Weight pitch in semitones: a 2.2-semitone shift (~15% F0 change) strongly contributes to clustering
-    pitch_feat = ((semitones - np.mean(semitones)) / 2.2)[:, None] * 1.8
-    feat_mat = np.hstack([timbre_z / np.sqrt(12.0), pitch_feat]).astype(np.float32)
+    pitch_feat = ((semitones - float(np.median(semitones))) / 3.6)[:, None]
+    feat_mat = np.hstack([timbre_mat * 4.0, pitch_feat]).astype(np.float32)
 
     def _cosine_dist(u: np.ndarray, v: np.ndarray) -> float:
         nu, nv = float(np.linalg.norm(u)), float(np.linalg.norm(v))
@@ -308,12 +388,10 @@ def diarize_speakers(
     best_labels = np.zeros(len(timbres), dtype=np.int32)
     max_k = min(max_speakers, len(timbres))
     for k in range(max_k, 1, -1):
-        vq_res = kmeans_vq(feat_mat, k=k, max_iter=40, seed=42)
-        labels = vq_res.quantized_indices
+        labels = _kmeans_farthest_init(feat_mat, k=k, max_iter=40)
         used = [c for c in range(k) if np.sum(labels == c) > 0]
         if len(used) < 2:
             continue
-        # Ensure every cluster pair reflects a genuine speaker pitch or timbre difference
         all_distinct = True
         for i_a in range(len(used)):
             for i_b in range(i_a + 1, len(used)):
@@ -322,8 +400,8 @@ def diarize_speakers(
                 idx_b = np.where(labels == cb)[0]
                 semi_diff = abs(float(np.median(semitones[idx_a])) - float(np.median(semitones[idx_b])))
                 cos_diff = _cosine_dist(np.mean(timbre_mat[idx_a], axis=0), np.mean(timbre_mat[idx_b], axis=0))
-                # Distinct speakers require a strong pitch gap (>= 3.2 st), strong timbre divergence, or both combined
-                is_distinct = (semi_diff >= 3.2) or (cos_diff >= 0.06) or (semi_diff >= 2.0 and cos_diff >= 0.025)
+                # Distinct speakers require genuine timbre shift, major pitch shift (>= 5.2 st), or both combined
+                is_distinct = (cos_diff >= 0.05) or (semi_diff >= 5.2) or (semi_diff >= 2.2 and cos_diff >= 0.015)
                 if not is_distinct:
                     all_distinct = False
                     break
@@ -333,7 +411,6 @@ def diarize_speakers(
             best_labels = labels
             break
 
-    # Map cluster IDs chronologically so first person heard is always Speaker 1
     assigned = ["Speaker 1"] * len(speech_segments)
     cluster_map: Dict[int, str] = {}
     for pos, orig_idx in enumerate(valid_indices):
@@ -429,11 +506,39 @@ def analyze_segment_prosody(
         rate_wps = round(words_cnt / dur, 2) if words_cnt else 0.0
         text_str = str(seg.get("text", "")).strip()
 
-        if text_str.endswith("?") or slope_hz >= 14.0:
+        pitch_std = float(pitch.get("pitch_std_hz", 0.0))
+        vocal_rising = slope_hz >= 10.0
+        has_q_mark = text_str.endswith("?")
+        is_question = vocal_rising or has_q_mark
+
+        if vocal_rising and has_q_mark:
+            q_reason = f"Rising inflection (+{slope_hz:.1f} Hz)"
+        elif vocal_rising:
+            q_reason = f"Vocal rising inflection (+{slope_hz:.1f} Hz)"
+        elif has_q_mark:
+            q_reason = "Question phrasing"
+        else:
+            q_reason = "Statement contour"
+
+        # Strictly one-word acoustic emphasis tag per sentence
+        if energy_ratio >= 1.35 and rate_wps >= 2.7:
+            emphasis_tag = "Urgent"
+        elif energy_ratio >= 1.22 or pitch_std >= 28.0:
+            emphasis_tag = "Emphatic"
+        elif energy_ratio >= 1.08 or pitch_std >= 16.0:
+            emphasis_tag = "Assertive"
+        elif 0.0 < energy_ratio <= 0.72 and rate_wps < 2.0:
+            emphasis_tag = "Hesitant"
+        elif 0.0 < energy_ratio <= 0.78:
+            emphasis_tag = "Soft"
+        else:
+            emphasis_tag = "Neutral"
+
+        if is_question:
             style = "Question / Rising"
-        elif energy_ratio >= 1.25 or float(pitch.get("pitch_std_hz", 0.0)) >= 28.0:
+        elif emphasis_tag in ("Urgent", "Emphatic"):
             style = "Emphasized / Key Point"
-        elif 0.0 < energy_ratio <= 0.72:
+        elif emphasis_tag in ("Soft", "Hesitant"):
             style = "Soft / Understated"
         else:
             style = "Steady Statement"
@@ -441,6 +546,9 @@ def analyze_segment_prosody(
         enriched.append({
             **seg,
             "delivery_style": style,
+            "emphasis_tag": emphasis_tag,
+            "is_question": is_question,
+            "question_reason": q_reason,
             "mean_f0_hz": round(float(pitch.get("mean_f0_hz", 0.0)), 1),
             "pitch_slope_hz": slope_hz,
             "energy_ratio": energy_ratio,

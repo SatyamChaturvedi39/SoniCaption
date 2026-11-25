@@ -98,7 +98,7 @@ For non-speech sound recognition, Piczak's ESC-50 dataset \cite{piczak2015esc} s
 \centering
 \caption{Comparison of Existing Speech/Audio Tools vs.\ SonicCaption}
 \vspace{4pt}
-\scalebox{0.84}{
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}lllllll@{}}
 \toprule
 \textbf{System} & \textbf{Speech + Speakers} & \textbf{Emphasis \& Questions} & \textbf{Room Cues} & \textbf{Tasks \& Scenario} & \textbf{AI Voice Check} & \textbf{Exports} \\ \midrule
@@ -107,7 +107,7 @@ PANNs / AudioSet & No & No & Yes ($527$ tags) & No & No & Raw tags \\
 Google Live Transcribe & Live text & No & Basic icons & No & No & None \\
 Classic DTW/HMM \cite{sakoe1978dynamic} & Small vocab & No & No & No & No & Internal only \\ \midrule
 \textbf{SonicCaption} & \textbf{Whisper + Speakers} & \textbf{1-Word + Pitch Rise} & \textbf{ResNet-18 ($80\%$)} & \textbf{Yes (Groq + Rules)} & \textbf{Yes (Biometric)} & \textbf{5 Formats} \\ \bottomrule
-\end{tabular}
+\end{tabular}%
 }
 \label{tab:sota}
 \end{table*}
@@ -267,7 +267,7 @@ After integration, automated tests and live API runs confirmed all modules work 
 \centering
 \caption{Verified System Build, Test Suite, and Live API Checks}
 \vspace{4pt}
-\scalebox{0.84}{
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}lll@{}}
 \toprule
 \textbf{Check} & \textbf{What Was Tested} & \textbf{Result} \\ \midrule
@@ -276,7 +276,7 @@ Frontend Build & TypeScript + Vite production build & Built in $1.66\text{ s}$ (
 Meeting Audio Upload & Batch analyze endpoint on test speech clip & HTTP $200$; Groq scenario + \texttt{Assertive} tag \\
 Live Action Extraction & Live intelligence endpoint on multi-speaker exchange & HTTP $200$; assigned GitHub task to Speaker 3 \\
 Speaker Separation & 3-turn pitch test ($131 \to 195 \to 164.7\text{ Hz}$) & Exact \texttt{Speaker 1, Speaker 2, Speaker 1} \\ \bottomrule
-\end{tabular}
+\end{tabular}%
 }
 \label{tab:verification}
 \end{table*}
